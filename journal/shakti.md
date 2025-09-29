@@ -1,4 +1,4 @@
-// Shakti processor architecture 
+# Shakti processor architecture
 
 For the most part the architecture is similar to the intel pentium (using it as reference since we already know pentium's architecture)
 
@@ -13,7 +13,7 @@ Execute – Do the calculation or prepare for memory access.
 Memory – Load or store data if needed.
 Write Back – Save the result into the register file.
 
-Register file and CSR: 
+## Register file and CSR: 
 RISC-V processors have 32 important registers, and a bunch of special control and status registers that contain system information. 
 
 If we look at each stage:
@@ -39,3 +39,7 @@ Interacts with dcache for load and store instructions. Handles address translati
 As simple as it sounds, writes back into register file.
 
 We should probably focus on the Memory access, and instruction fetch stages, since those are the ones that will be accessing data from memory. Implement SMT on memory and find a way to integrate it with these stages to validate integrity of data. 
+
+## Decoding the Stages on the SoC's bluespec implementation 
+
+Stage0: (./src/)
