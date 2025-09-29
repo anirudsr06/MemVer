@@ -1,3 +1,5 @@
+/* Program to be compiled for shakti to test for hash - benchmarking */
+
 #include <uart.h>
 #include <stdio.h>
 #include "sha256.h"
