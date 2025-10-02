@@ -1,21 +1,3 @@
-#Created by Sathya Narayanan N & Abhinav Ramnath
-# Email id: sathya281@gmail.com & abhinavramnath13@gmail.com
-
-#  Copyright (C) 2019 IIT Madras. All rights reserved.
-
-#This program is free software: you can redistribute it and/or modify
-#it under the terms of the GNU General Public License as published by
-#the Free Software Foundation, either version 3 of the License, or
-#(at your option) any later version.
-
-#This program is distributed in the hope that it will be useful,
-#but WITHOUT ANY WARRANTY; without even the implied warranty of
-#MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#  GNU General Public License for more details.
-
-#  You should have received a copy of the GNU General Public License
-#  along with this program. If not, see <https://www.gnu.org/licenses/>.
-
 SHELL := /bin/bash # Use bash syntax
 
 export XLEN
@@ -27,20 +9,17 @@ export filepath
 
 # appln and target board
 PROGRAM ?=all
-TARGET ?=artix7_35t
+TARGET ?=artix7_100t
 DEBUG ?=
-UPLOAD ?=
-FLASH ?=
 XLEN ?=32
 filepath ?=
 D ?=
-OPENOCD ?= $(shell which openocd)
-GENLIB:=$(shell pwd)/../../software/tests/
-# Invoke all possible combinations of applns for different targets
-# There is a provision to make in the exact folder where code is written
-# We are using that provision to invole appropriate makefile scripts from top folder
-all: check library do upload flash finish
-	@echo "All done !"
+openocd ?= $(shell which openocd)
+
+GENLIB:=$(shell pwd)/
+
+all: check library do run_gdb finish
+	@echo "All done"
 
 check:
 ifeq ($(DEBUG),DEBUG)
@@ -64,60 +43,12 @@ ifeq ($(TARGET),artix7_100t)
 	@$(eval MABI=lp64)
 	@$(eval INTERFACE=$(bspboard)/ftdi)
 	@$(eval DC =$(FLAGS) $(D))
-else
-ifeq ($(TARGET),moushik)
-	@$(eval XLEN = 32)
-	@$(eval WIDTH = 4)
-	@$(eval FLAGS= -D AARDONYX)
-	@$(eval MARCH=rv32imac)
-	@$(eval MABI=ilp32)
-	@$(eval UPLOADER=$(UPLOADDIR)/micron)
-	@$(eval FLASHSPEC=$(bspdri)/qspi/qspi_micron.c)
-	@$(eval INTERFACE=$(bspboard)/jlink)
-	@$(eval DC =$(FLAGS) $(D) )
-else
-ifeq ($(TARGET),pinaka)                         # e-class 35t rv32imac
-	@$(eval XLEN = 32)
-	@$(eval WIDTH = 4)
-	@$(eval FLAGS= -D pinaka)
-	@$(eval MARCH=rv32imac)
-	@$(eval MABI=ilp32)
-	@$(eval UPLOADER=$(UPLOADDIR)/spansion)
-	@$(eval INTERFACE=$(bspboard)/ftdi)
-	@$(eval DC =$(FLAGS) $(D))
-else
-ifeq ($(TARGET),parashu)                         # e-class 100t rv32imac
-	@$(eval XLEN = 32)
-	@$(eval WIDTH = 4)
-	@$(eval FLAGS= -D parashu)
-	@$(eval MARCH=rv32imac)
-	@$(eval MABI=ilp32)
-	@$(eval UPLOADER=$(UPLOADDIR)/spansion)
-	@$(eval INTERFACE=$(bspboard)/ftdi)
-	@$(eval DC =$(FLAGS) $(D))
-else
-ifeq ($(TARGET),vajra)                         # c-class 100t rv64imacsu
-	@$(eval XLEN = 64)
-	@$(eval WIDTH = 8)
-	@$(eval FLAGS= -D vajra)
-	@$(eval MARCH=rv64imac)
-	@$(eval MABI=lp64)
-	@$(eval UPLOADER=$(UPLOADDIR)/spansion)
-	@$(eval INTERFACE=$(bspboard)/ftdi)
-	@$(eval DC =$(FLAGS) $(D))
-else
-	@echo -e "$(TARGET) not supported"
-endif
-endif
-endif
-endif
 endif
 endif
 
 library:
-ifeq ($(CLEAR),)
-	make compile build
-endif
+	@if [ -z "$(CLEAR)" ]; then make compile build; fi
+
 compile:
 	@mkdir -p ./gen_lib
 	@riscv$(XLEN)-unknown-elf-gcc -march=$(MARCH) -mabi=$(MABI) $(DC) -mcmodel=medany -static -std=gnu99 -fno-builtin-printf -I$(bspinc) -c $(bsplib)/util.c -o ./gen_lib/util.o -lm -lgcc
@@ -138,112 +69,48 @@ compile:
 build:
 	@riscv$(XLEN)-unknown-elf-ar rcs ./gen_lib/libshakti$(XLEN).a ./gen_lib/start.o ./gen_lib/trap.o ./gen_lib/util.o ./gen_lib/traps.o ./gen_lib/log.o ./gen_lib/printf.shakti ./gen_lib/qspi_micron.o ./gen_lib/uart.o ./gen_lib/i2c_driver.o ./gen_lib/clint_driver.o ./gen_lib/plic_driver.o ./gen_lib/init.o  ./gen_lib/xadc_driver.o ./gen_lib/pwm_driver.o ./gen_lib/eth_driver.o
 
-
-# Add files in the same format
-#
 do:
 ifeq ($(PROGRAM),ALU)
-filepath := ./ALU
+	@$(eval filepath := ./ALU)
 else
 ifeq ($(PROGRAM),ALUrand)
-filepath := ./ALUrand
+	@$(eval filepath := ./ALUrand)
 else
 ifeq ($(PROGRAM),Arrays)
-filepath := ./Arrays
+	@$(eval filepath := ./Arrays)
 else
 ifeq ($(PROGRAM),Arrays2)
-filepath := ./Arrays2
+	@$(eval filepath := ./Arrays2)
+else
+ifeq ($(PROGRAM),mkt)
+	@$(eval filepath := ./mkt)
+else
+ifeq ($(PROGRAM),paranoia)
+	@$(eval filepath := ./paranoia)
 else
 	@echo "Entry for $(PROGRAM) not present"
-endif 
+endif
+endif
+endif
 endif
 endif
 endif
 
-erase: check library 
-	@rm -r output
-	@mkdir output
-	@riscv$(XLEN)-unknown-elf-gcc -march=$(MARCH) -mabi=$(MABI) -w $(DC) -mcmodel=medany -static -std=gnu99 -fno-builtin-printf -I$(bspboard) -I$(bspinc)  -c ../../bsp/utils/uploader/spansion/erase.c -o ./gen_lib/erase.o 
-	@riscv$(XLEN)-unknown-elf-gcc -march=$(MARCH) -mabi=$(MABI) -w $(DC) -mcmodel=medany -static -std=gnu99 -fno-builtin-printf -I$(bspinc) -c $(bspdri)/spi/spi_spansion.c -o gen_lib/flash_driver.o  
-	@riscv$(XLEN)-unknown-elf-gcc -march=$(MARCH) -mabi=$(MABI) -T  $(bspboard)/link.ld $(GENLIB)/gen_lib/libshakti$(XLEN).a gen_lib/flash_driver.o ./gen_lib/erase.o -o ./gen_lib/flasherase.shakti -static -nostartfiles 
-
-
-upload: library do finish do1 path 
-path:
-FILEPATH:='"$(GENLIB)$(filepath)"'
-
-do1:
-ifeq ($(UPLOAD),UPLOAD)
-	@elf2hex 4 8192 $(filepath)/output/$(PROGRAM).shakti 2147483648 > $(filepath)/output/code.mem
-	@gcc -g -w -D FILEPATH='"$(FILEPATH)"' $(UPLOADDIR)/elf_to_header.c -o $(filepath)/output/elf_to_header
-	@$(filepath)/output/elf_to_header
-	@riscv$(XLEN)-unknown-elf-gcc -w $(DC) -mcmodel=medany -static -std=gnu99 -fno-builtin-printf $(FLAGS) -I$(bspboard) -I$(bspinc) -I$(filepath)/output -c $(UPLOADER)/deploy.c -o $(filepath)/output/deploy.o -march=$(MARCH) -mabi=$(MABI) -lm -lgcc
-	@riscv$(XLEN)-unknown-elf-gcc -w $(DC) -mcmodel=medany -static -std=gnu99 -fno-builtin-printf -I$(bspinc) -c $(FLASHSPEC) -o $(filepath)/output/flash_driver.o -march=$(MARCH) -mabi=$(MABI) -lm -lgcc
-	@riscv$(XLEN)-unknown-elf-gcc -T $(bspboard)/link.ld $(filepath)/output/deploy.o $(filepath)/output/flash_driver.o $(GENLIB)/gen_lib/libshakti$(XLEN).a -o $(filepath)/output/deploy.shakti -static -nostartfiles -march=$(MARCH) -mabi=$(MABI) -lm -lgcc
-	@riscv$(XLEN)-unknown-elf-objdump -D $(filepath)/output/deploy.shakti > $(filepath)/output/deploy.dump
-	@echo -e "Upload elf to Flash"
-#	@$(UPLOADDIR)/burnFlash.py ./genlib/deploy.shakti
-#	@sudo $(OPENOCD) -f $(INTERFACE).cfg -c "reset init" -c "load_image $(filepath)/output/deploy.shakti ;resume 0x80000000;shutdown"
-	@riscv$(XLEN)-unknown-elf-objcopy -O ihex $(filepath)/output/deploy.shakti $(filepath)/output/deploy.hex
-	@sudo $(OPENOCD) -f $(INTERFACE).cfg -c "reset init" -c "load_image $(filepath)/output/deploy.hex ;resume 0x80000000;shutdown"
-	@rm -rf ./gen_lib/*.o
-endif
-
-flash:
-ifeq ($(FLASH),FLASH)
-	@flashrom -p ft2232_spi:type=arm-usb-tiny-h > ./$(filepath)/output/flashoutput.txt
-	make moushik
-endif
-moushik : flashsize flashcheck objectsize swap filesize fill layoutsize layout flashrom clean
-flashsize:
-	@echo "Calculating flash size"
-	@$(eval FLASHROM = $(shell egrep -o -e '[0-9]+\ kB' ./$(filepath)/output/flashoutput.txt | egrep -o '[0-9]+') )
-	@$(eval FLASHSIZE = $(shell echo $(FLASHROM)*1024 | bc ) )
-	@echo "Checking for flash"
-flashcheck:
-	@echo "Size of flash attached is" $(FLASHSIZE)
-	@riscv32-unknown-elf-objcopy -O binary ./$(filepath)/output/$(PROGRAM).shakti ./$(filepath)/output/output.bin 
-
-objectsize:
-#Find size of output.bin and append it to the binary file
-	$(eval FILE = $(shell stat -c %s ./$(filepath)/output/output.bin))
-swap:
-	@echo "The size of the bin file is : " $(FILE)
-#	Swaps endianness from little-endian to big-endian as the flash programmer swaps endianness during write.
-	@hexdump -v -e '1/4 "%08x"' -e '"\n"' ./$(filepath)/output/output.bin | xxd -r -p > ./$(filepath)/output/bigoutput.bin	
-	@printf "%08x\n" $(FILE) > ./$(filepath)/output/size.txt
-#	Appending file size to bin file	
-	@xxd -r -p ./$(filepath)/output/size.txt ./$(filepath)/output/newoutput.bin
-	@cat ./$(filepath)/output/bigoutput.bin >> ./$(filepath)/output/newoutput.bin
-filesize:
-	@$(eval FILESIZE=$(shell stat -c%s ./$(filepath)/output/newoutput.bin) )
-fill:
-	@$(eval SPACE = $(shell echo $(FLASHSIZE)-$(FILESIZE) | bc ) )
-	@echo "Expanding bin to flash size. This might take a few seconds.."
-#the file is expanded to 32kb and appended with 0's where required.
-	@dd if=/dev/zero of=./$(filepath)/output/newoutput.bin bs=1 count=$(SPACE) conv=notrunc oflag=append
-layoutsize:
-	@printf "%x\n" $(FLASHSIZE) > ./$(filepath)/output/size1.txt	
-layout:
-	@$(eval FILESIZE= $(shell cat ./$(filepath)/output/size.txt) )
-	@echo "0000:$(FILESIZE) flash" > ./$(filepath)/output/layout.txt
-flashrom:
-	@flashrom -p ft2232_spi:type=arm-usb-tiny-h -l ./$(filepath)/output/layout.txt -i flash -w ./$(filepath)/output/newoutput.bin
-clean:
-	@rm -rf ./$(filepath)/output/*.txt
-	@rm -rf ./$(filepath)/output/*.bin
+.PHONY: run_gdb
+run_gdb: library do
+	@echo "Starting OpenOCD and running $(PROGRAM) on RAM using GDB..."
+	@echo $(openocd)
+	@cd $(shell pwd)/../../bsp/third_party/artix7_100t && $(openocd) -f ftdi.cfg & 
+	@sleep 2  # wait for OpenOCD to initialize
+	@riscv-none-elf-gdb -ex "set remotetimeout unlimited" \
+	                              -ex "target remote localhost:3333" \
+	                              -ex "file $(GENLIB)$(PROGRAM)/output/$(PROGRAM).shakti" \
+	                              -ex "load" \
+	                              -ex "c"
 
 finish:
-ifeq ($(PROGRAM),all)
-	@echo -e "make all over"
-else
-ifeq ($(CLEAR),)
-	cd $(filepath) && $(MAKE) $(PROGRAM).riscv TARGET=$(TARGET) DEBUG=$(DEBUG)
-else
-ifeq ($(PROGRAM),)
-	cd $(filepath)/../ && $(MAKE) clean CLEAR=$(CLEAR)
-else
-	cd $(filepath)/../ && $(MAKE) clean PROGRAM=$(PROGRAM) CLEAR=$(CLEAR)
-endif
-endif
-endif
+	@if [ "$(PROGRAM)" = "all" ]; then \
+		echo "make all over"; \
+	else \
+		cd $(filepath) && $(MAKE) $(PROGRAM).riscv TARGET=$(TARGET) DEBUG=$(DEBUG); \
+	fi
