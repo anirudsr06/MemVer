@@ -4,7 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <execution>
-#include<openssl/sha.h>
+#include "sha256.h"
 #include <iostream>
 #include <string> 
 #include <vector>
@@ -12,18 +12,21 @@
 using namespace std;
 
 // Function to compute sha256 of a string
-string sha256(string input){
-    unsigned char hash[SHA256_DIGEST_LENGTH];
+string sha256(string input) {
+    struct sha256_buff buff;
+    uint8_t hash[32];
 
-    SHA256(reinterpret_cast<const unsigned char*>(input.c_str()), input.size(), hash);
+    sha256_init(&buff);
+    sha256_update(&buff, input.data(), input.size());
+    sha256_finalize(&buff);
 
-    char buf[2*SHA256_DIGEST_LENGTH+1];
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++)
-        sprintf(buf + (i*2), "%02x", hash[i]);
-    buf[2*SHA256_DIGEST_LENGTH] = 0;
+    char buf[65]; // 64 hex chars + null terminator
+    for (int i = 0; i < 32; i++)
+        sprintf(buf + (i * 2), "%02x", hash[i]);
+    buf[64] = 0;
+
     return string(buf);
 }
-
 // Linked list to construct tree
 struct bNode{
     string hash;
