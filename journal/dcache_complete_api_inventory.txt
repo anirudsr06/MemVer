@@ -1,0 +1,290 @@
+
+==============================
+FILE: dcache_lib.bsv
+==============================
+
+-- STRUCTS --
+struct TagResponse {
+  `ifdef dcache_ecc
+  Bit#(ways) sed;
+  Bit#(ways) ded;
+  `endif
+  Bit#(ways)    waymask;
+  Bit#(a)       address;
+}
+
+struct DataResponse {
+  `ifdef dcache_ecc
+  Bit#(b) line_sed;
+  Bit#(b) line_ded;
+  Bit#(1) word_sed;
+  Bit#(1) word_ded;
+  Bit#(TMul#(b,TAdd#(2,TLog#(TMul#(8,w))))) stored_parity;
+  Bit#(TMul#(b,TAdd#(2,TLog#(TMul#(8,w))))) check_parity;
+  `endif
+  Bit#(TMul#(TMul#(w,8),b)) line;
+  Bit#(TMul#(8,w)) word;
+}
+
+struct ReleaseInfo {
+  Bit#(l) dataline;
+  Bit#(a) address;
+  Bit#(1) err;
+  Bit#(1) dirty;
+}
+
+struct PollingResponse {
+  Bit#(1) err;
+  Bit#(TMul#(w,8)) word;
+  Bit#(f) waymask;
+  Bool line_hit;
+  Bool word_hit;
+}
+
+struct Storebuffer {
+  Bit#(a) addr;
+  Bit#(d) data;
+  Bit#(e) epoch;
+  Bit#(f) fbindex;
+  Bit#(d) mask;
+  Bool    io;
+  Bit#(2) size;
+}
+
+
+-- ENUMS --
+  (none)
+
+-- INTERFACES --
+  (none)
+
+==============================
+FILE: dcache_types.bsv
+==============================
+
+-- STRUCTS --
+struct DCache_core_request {
+  Bit#(addr)    address;
+  Bool          fence;
+  Bit#(esize)   epochs;
+  Bit#(2)       access;
+  Bit#(3)       size;
+  Bit#(data)    data;
+  `ifdef atomic
+  Bit#(5)       atomic_op;
+  `endif
+  `ifdef supervisor
+  Bool          ptwalk_req;
+  `endif
+}
+
+struct DCache_mem_readreq {
+  Bit#(addr)    address;
+  Bit#(8)       burst_len;
+  Bit#(3)       burst_size;
+  Bool          io;
+}
+
+struct DCache_mem_readresp {
+  Bit#(data)    data;
+  Bool          last;
+  Bool          err;
+}
+
+struct DCache_mem_writereq {
+  Bit#(addr)      address;
+  Bit#(data)      data;
+  Bit#(8)         burst_len;
+  Bit#(3)         burst_size;
+  Bool            io;
+}
+
+struct DMem_request {
+  Bit#(addr)    address;
+  Bit#(esize)   epochs;
+  Bit#(3)       size;
+  Bool          fence;
+  Bit#(2)       access;
+  Bit#(data)    writedata;
+  `ifdef atomic
+  Bit#(5)       atomic_op;
+  `endif
+  `ifdef supervisor
+  Bool          sfence;
+  Bool          ptwalk_req;
+  Bool          ptwalk_trap;
+  `endif
+}
+
+struct DMem_core_response {
+  Bit#(data)        word;
+  Bool              trap;
+  Bit#(`causesize)  cause;
+  Bit#(esize)       epochs;
+}
+
+struct ECC_dcache_tag {
+  Bit#(a) address;
+  Bit#(w) way;
+}
+
+struct ECC_dcache_data {
+  Bit#(a) address;
+  Bit#(b) banks;
+  Bit#(w) way;
+}
+
+struct DRamAccess {
+  Bit#(TLog#(`dsets)) index;
+  Bit#(TLog#(`dways)) way;
+  Bit#(TLog#(`dblocks)) banks;
+  Bit#(TMul#(`dwords,8)) data;
+  Bool read_write; // False: read True: write
+  Bool tag_data; // False: tag True: daa
+}
+
+
+-- ENUMS --
+enum RespState {
+  Hit=1, Miss=0, None=2
+}
+
+
+-- INTERFACES --
+  (none)
+
+==============================
+FILE: dcache1rw.bsv
+==============================
+
+-- STRUCTS --
+struct Pending_req {
+  Bit#(TLog#(blocks)) init_bank;
+  Bit#(TLog#(fbsize)) fbindex;
+  Bool io_request;
+}
+
+
+-- ENUMS --
+  (none)
+
+-- INTERFACES --
+interface Ifc_dcache
+  method DCache_mem_writereq#(`paddr, TMul#(`dblocks, TMul#(`dwords, 8))) mv_write_mem_req;
+  method Action ma_write_mem_req_deq;
+  method Action ma_curr_priv (Bit#(2) c);
+  method Bit#(13) mv_perf_counters;
+  method Action ma_cache_enable(Bool c);
+  method Bool mv_storebuffer_empty;
+  method Action ma_perform_store(Bit#(`desize) currepoch);
+  method Bool mv_cacheable_store;
+  method Bool mv_cache_available;
+  method Bool mv_commit_store_ready;
+  method Maybe#(ECC_dcache_data#(`paddr, `dways, `dblocks)) mv_ded_data;
+  method Maybe#(ECC_dcache_data#(`paddr, `dways, `dblocks)) mv_sed_data;
+  method Maybe#(ECC_dcache_tag#(`paddr, `dways)) mv_ded_tag;
+  method Maybe#(ECC_dcache_tag#(`paddr, `dways)) mv_sed_tag;
+  method Action ma_ram_request(DRamAccess access);
+  method Bit#(`respwidth) mv_ram_response;
+endinterface
+
+
+==============================
+FILE: dcache2rw.bsv
+==============================
+
+-- STRUCTS --
+struct Pending_req {
+  Bit#(TLog#(banks)) init_bank;
+  Bit#(TLog#(fbsize)) fbindex;
+  Bool io_request;
+}
+
+
+-- ENUMS --
+  (none)
+
+-- INTERFACES --
+interface Ifc_dcache
+  method DCache_mem_writereq#(`paddr, TMul#(`dblocks, TMul#(`dwords, 8))) mv_write_mem_req;
+  method Action ma_write_mem_req_deq;
+  method Bit#(13) mv_perf_counters;
+  method Action ma_cache_enable(Bool c);
+  method Action ma_curr_priv (Bit#(2) c);
+  method Bool mv_storebuffer_empty;
+  method Action ma_perform_store(Bit#(`desize) currepoch);
+  method Bool mv_cacheable_store;
+  method Bool mv_cache_available;
+  method Bool mv_commit_store_ready;
+  method Maybe#(ECC_dcache_data#(`paddr, `dways, `dblocks)) mv_ded_data;
+  method Maybe#(ECC_dcache_data#(`paddr, `dways, `dblocks)) mv_sed_data;
+  method Maybe#(ECC_dcache_tag#(`paddr, `dways)) mv_ded_tag;
+  method Maybe#(ECC_dcache_tag#(`paddr, `dways)) mv_sed_tag;
+  method Action ma_ram_request(DRamAccess access);
+  method Bit#(`respwidth) mv_ram_response;
+endinterface
+
+
+==============================
+FILE: dmem.bsv
+==============================
+
+-- STRUCTS --
+  (none)
+
+-- ENUMS --
+  (none)
+
+-- INTERFACES --
+interface Ifc_dmem
+  method Bool mv_storebuffer_empty;
+  method Action ma_perform_store(Bit#(`desize ) currepoch);
+  method DCache_mem_writereq#(`paddr, TMul#(`dblocks, TMul#(`dwords, 8))) mv_write_mem_req_rd;
+  method DCache_mem_writereq#(`paddr, TMul#(`dwords, 8)) mv_write_mem_req_rd;
+  method Action ma_write_mem_req_deq;
+  method Action ma_cache_enable(Bool c);
+  method Bool mv_cacheable_store;
+  method Bool mv_cache_available;
+  method Bool mv_commit_store_ready;
+  method to recieve the current privilege mode of operation*/
+    method Action ma_curr_priv (Bit#(2) c);
+  method to receive the current satp csr from the core*/
+    method Action ma_satp_from_csr (Bit#(`vaddr) s);
+  method to receive the current values of the mstatus register*/
+    method Action ma_mstatus_from_csr (Bit#(`vaddr) m);
+  method Bit#(13) mv_dcache_perf_counters;
+  method Bit#(1) mv_dtlb_perf_counters;
+  method Maybe#(ECC_dcache_data#(`paddr, `dways, `dblocks)) mv_ded_data;
+  method Maybe#(ECC_dcache_data#(`paddr, `dways, `dblocks)) mv_sed_data;
+  method Maybe#(ECC_dcache_tag#(`paddr, `dways)) mv_ded_tag;
+  method Maybe#(ECC_dcache_tag#(`paddr, `dways)) mv_sed_tag;
+  method Action ma_ram_request(DRamAccess access);
+  method Bit#(`respwidth) mv_ram_response;
+endinterface
+
+
+==============================
+FILE: null_dcache.bsv
+==============================
+
+-- STRUCTS --
+  (none)
+
+-- ENUMS --
+  (none)
+
+-- INTERFACES --
+  (none)
+
+==============================
+FILE: replacement_dcache.bsv
+==============================
+
+-- STRUCTS --
+  (none)
+
+-- ENUMS --
+  (none)
+
+-- INTERFACES --
+  (none)
