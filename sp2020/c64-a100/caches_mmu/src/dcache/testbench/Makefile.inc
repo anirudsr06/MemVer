@@ -30,7 +30,7 @@ THREADS=1
 COVERAGE=none
 TRACE=disable
 
-TOP_MODULE:=mkTbMVU
+TOP_MODULE:=mkTb_mvu
 DIR:=../:../../../../common_bsv/:../../../../common_verilog/bsvwrappers/:../../tlbs/:../../pmp/
 TOP_DIR:= ./
 TOP_FILE:= tb_mvu.bsv

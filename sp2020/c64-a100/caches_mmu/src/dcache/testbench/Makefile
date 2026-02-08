@@ -89,7 +89,7 @@ generate_verilog:
 	@echo "old_define_macros = $(define_macros)" > vars
 	bsc -u -verilog -elab -vdir $(VERILOGDIR) -bdir $(BSVBUILDDIR) -info-dir $(BSVBUILDDIR) \
 		+RTS -K4000M -RTS -check-assert  -keep-fires -opt-undetermined-vals -remove-false-rules \
-		-remove-empty-rules -remove-starved-rules -remove-dollar -unspecified-to X -show-schedule \
+		-remove-empty-rules -remove-starved-rules -remove-dollar -unspecified-to X -show-schedule -show-range-conflict \
 		-show-module-use $(define_macros) -D verilog=True $(BSVCOMPILEOPTS) \
 		-p $(BSVINCDIR) -g $(TOP_MODULE) $(TOP_DIR)/$(TOP_FILE)  || (echo "BSC COMPILE ERROR"; exit 1) 
 	@cp ../../../../common_verilog/*.v $(VERILOGDIR)
