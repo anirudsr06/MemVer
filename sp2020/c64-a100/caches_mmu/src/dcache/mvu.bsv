@@ -38,6 +38,13 @@ package mvu;
         Bit#(3) sibling_mask;  // Which siblings to fetch (7 of 8, excluding one we have)
     } TreeNodeReq deriving(Bits, Eq, FShow);
 
+    // Write request for tree nodes (updates)
+    typedef struct {
+        Level level;
+        TreeIndex index;
+        Bit#(HashWidth) hash;
+    } TreeNodeWrite deriving(Bits, Eq, FShow);
+
     // Response with tree nodes
     typedef struct {
         Vector#(Arity, Bit#(HashWidth)) hashes;
@@ -53,6 +60,8 @@ package mvu;
         WAIT_SIBLINGS,     // Wait for sibling response
         COMPUTE_PARENT,    // Hash current level's 8 nodes
         CHECK_PARENT,      // Verify against stored or store new
+        UPDATE_NODE,       // Write new hash to memory/storage
+        WAIT_UPDATE_ACK,   // Wait for write completion
         PROPAGATE_UP,      // Move to next level
         VERIFY_ROOT,       // Final root check
         COMPLETE,
@@ -64,6 +73,9 @@ interface Ifc_mvu;
     interface Put#(DCache_mem_readreq#(`paddr)) put_cache_read_req;
     interface Get#(DCache_mem_readresp#(`dbuswidth)) get_cache_read_resp;
 
+    // Eviction interface (Write notification)
+    interface Put#(DCache_mem_writereq#(`paddr, TMul#(`dblocks, TMul#(`dwords, 8)))) put_evict_req;
+
     // Memory interface (for data)
     interface Get#(DCache_mem_readreq#(`paddr)) get_mem_read_req;
     interface Put#(DCache_mem_readresp#(`dbuswidth)) put_mem_read_resp;
@@ -71,6 +83,8 @@ interface Ifc_mvu;
     // Tree node memory interface (for siblings)
     interface Get#(TreeNodeReq) get_tree_node_req;
     interface Put#(TreeNodeResp) put_tree_node_resp;
+    interface Get#(TreeNodeWrite) get_tree_write_req;
+    interface Put#(Bool) put_tree_write_resp;
 
     // Control
     method Action ma_enable(Bool en);
@@ -85,12 +99,15 @@ endinterface
     module mkmvu(Ifc_mvu);
         // FIFOs
         FIFOF#(DCache_mem_readreq#(`paddr)) ff_req_from_cache <- mkFIFOF;
+        FIFOF#(DCache_mem_writereq#(`paddr, TMul#(`dblocks, TMul#(`dwords, 8)))) ff_evict_req <- mkFIFOF;
         FIFOF#(DCache_mem_readreq#(`paddr)) ff_req_to_mem <- mkFIFOF;
         FIFOF#(DCache_mem_readresp#(`dbuswidth)) ff_resp_from_mem <- mkFIFOF;
         FIFOF#(DCache_mem_readresp#(`dbuswidth)) ff_resp_to_cache <- mkFIFOF;
 
         FIFOF#(TreeNodeReq) ff_tree_req <- mkFIFOF;
         FIFOF#(TreeNodeResp) ff_tree_resp <- mkFIFOF;
+        FIFOF#(TreeNodeWrite) ff_tree_write <- mkFIFOF;
+        FIFOF#(Bool) ff_tree_write_resp <- mkFIFOF;
 
         // Configuration
         Reg#(Bool) rg_mvu_enabled <- mkReg(True);
@@ -99,6 +116,7 @@ endinterface
         // Request tracking
         Reg#(Maybe#(DCache_mem_readreq#(`paddr))) rg_pending_req <- mkReg(tagged Invalid);
         Reg#(Bool) rg_from_protected <- mkReg(False);
+        Reg#(Bool) rg_is_update <- mkReg(False);
         Reg#(TreeIndex) rg_base_leaf_index <- mkReg(0);
 
         // State machine
@@ -141,6 +159,39 @@ endinterface
         endfunction
 
         //=====================================================
+        // RULE: Handle Eviction Request (Start Update)
+        //=====================================================
+        rule rl_start_update(
+            ff_evict_req.notEmpty && 
+            rg_state == IDLE
+        );
+            let req = ff_evict_req.first;
+            ff_evict_req.deq;
+            
+            Bool is_protected = hcache.is_protected(req.address);
+            
+            if (is_protected && rg_mvu_enabled) begin
+                TreeIndex leaf_idx = hcache.addr_to_leaf_index(req.address);
+                
+                rg_is_update <= True;
+                rg_base_leaf_index <= leaf_idx;
+                rg_beat_count <= 0;
+                
+                // Extract 8 leaves from 512-bit data
+                // Assuming data is vector of 8x64 bits packed
+                Vector#(Arity, Bit#(HashWidth)) leaves = unpack(req.data);
+                rg_leaves <= leaves;
+                
+                rg_state <= COMPUTE_L0_PARENT;
+                
+                $display("[MVU] UPDATE START: Eviction at addr=%h, base_leaf_idx=%0d", 
+                        req.address, leaf_idx);
+            end else begin
+                $display("[MVU] Ignoring eviction at %h (not protected)", req.address);
+            end
+        endrule
+
+        //=====================================================
         // RULE: Forward request to memory
         //=====================================================
         rule rl_forward_request(
@@ -157,6 +208,7 @@ endinterface
                 TreeIndex leaf_idx = hcache.addr_to_leaf_index(req.address);
                 
                 rg_from_protected <= True;
+                rg_is_update <= False; // Ensure read mode
                 rg_base_leaf_index <= leaf_idx;
                 rg_beat_count <= 0;
                 rg_leaves <= replicate(0);
@@ -257,9 +309,12 @@ endinterface
         //=====================================================
         rule rl_fetch_siblings(rg_state == FETCH_SIBLINGS);
             if (hcache.is_hw_level(rg_current_level)) begin
-                // We're at HW level - check stored hash
-                $display("[MVU] Reached HW level %0d, checking stored hash", rg_current_level);
-                rg_state <= CHECK_PARENT;
+                // We're at HW level
+                $display("[MVU] Reached HW level %0d", rg_current_level);
+                if (rg_is_update)
+                    rg_state <= UPDATE_NODE;
+                else
+                    rg_state <= CHECK_PARENT;
             end else begin
                 // Need to fetch siblings from memory
                 TreeIndex base_idx = sibling_group_base(rg_current_index);
@@ -291,9 +346,26 @@ endinterface
             
             for (Integer i = 0; i < valueOf(Arity); i = i + 1) begin
                 if (resp.valid[i]) begin
-                    group[i] = resp.hashes[i];
-                    valid[i] = True;
-                    $display("[MVU] Sibling[%0d] = %h", i, resp.hashes[i]);
+                    // If update mode, we overwrite OLD hash at our pos with NEW hash
+                    // But in UPDATE mode, rg_node_group ALREADY has correct new hash at our_pos
+                    // Siblings are neighbors. Masks ensure we don't overwrite neighbors?
+                    // But we requested all siblings EXCEPT our position usually?
+                    // Actually mask usage is optional in current tree_memory.
+                    // But group[i] overwrites.
+                    // Important: Don't overwrite our computed hash with old hash from memory!
+                    // In Verification, it doesn't matter (should match).
+                    // In Update, it DOES matter.
+                    // Currently `child_position` logic ensures `valid[pos]` is True.
+                    // If memory returns data for our pos, we should IGNORE it?
+                    // `tree_memory` fetches 8 nodes.
+                    // `resp` has all 8.
+                    // Our `rg_node_group` has our calculated node at `pos`.
+                    
+                    Bit#(3) our_pos = child_position(rg_current_index);
+                    if (fromInteger(i) != our_pos) begin
+                        group[i] = resp.hashes[i];
+                        valid[i] = True;
+                    end
                 end
             end
             
@@ -317,7 +389,10 @@ endinterface
             rg_computed_parent <= parent_hash;
             
             $display("[MVU] Computed parent = %h", parent_hash);
-            rg_state <= CHECK_PARENT;
+            if (rg_is_update)
+                rg_state <= UPDATE_NODE;
+            else
+                rg_state <= CHECK_PARENT;
         endrule
 
         //=====================================================
@@ -348,6 +423,55 @@ endinterface
             // Check if we reached root
             if (rg_current_level >= hcache.get_tree_height()) begin
                 rg_state <= VERIFY_ROOT;
+            end else begin
+                rg_state <= PROPAGATE_UP;
+            end
+        endrule
+
+        //=====================================================
+        // RULE: Update Node (Write Back)
+        //=====================================================
+        rule rl_update_node(rg_state == UPDATE_NODE);
+            if (hcache.is_hw_level(rg_current_level)) begin
+                // Update HW hash
+                hcache.set_hash(rg_current_level, rg_current_index, rg_computed_parent);
+                $display("[MVU] UPDATE: Updated HW Hash at L%0d[%0d] = %h", 
+                        rg_current_level, rg_current_index, rg_computed_parent);
+                
+                // Check root after HW update
+                if (rg_current_level >= hcache.get_tree_height()) begin
+                    rg_state <= COMPLETE;
+                end else begin
+                    rg_state <= PROPAGATE_UP;
+                end
+            end else begin
+                // Write to tree memory
+                ff_tree_write.enq(TreeNodeWrite {
+                    level: rg_current_level,
+                    index: rg_current_index,
+                    hash: rg_computed_parent
+                });
+                $display("[MVU] UPDATE: Wrote Tree Node L%0d[%0d] = %h", 
+                        rg_current_level, rg_current_index, rg_computed_parent);
+                
+                // Wait for acknowledgment
+                rg_state <= WAIT_UPDATE_ACK;
+            end
+        endrule
+
+        //=====================================================
+        // RULE: Wait for Write Acknowledgment
+        //=====================================================
+        rule rl_wait_update_ack(rg_state == WAIT_UPDATE_ACK);
+            // Consume response
+            let ack = ff_tree_write_resp.first;
+            ff_tree_write_resp.deq;
+            
+            $display("[MVU] UPDATE: Write acknowledged");
+            
+            // Check root (tree logic similar to check_parent/propagate)
+            if (rg_current_level >= hcache.get_tree_height()) begin
+                rg_state <= COMPLETE;
             end else begin
                 rg_state <= PROPAGATE_UP;
             end
@@ -395,8 +519,15 @@ endinterface
         // RULE: Complete verification
         //=====================================================
         rule rl_complete(rg_state == COMPLETE);
-            $display("[MVU] Verification complete\n");
-            rg_state <= FORWARD_TO_CACHE;
+            $display("[MVU] Operation complete\n");
+            
+            if (rg_is_update) begin
+                 rg_state <= IDLE;
+                 rg_is_update <= False;
+            end else begin
+                 rg_state <= FORWARD_TO_CACHE;
+            end
+            
             rg_pending_req <= tagged Invalid;
             rg_from_protected <= False;
         endrule
@@ -437,17 +568,21 @@ endinterface
                 rg_forward_beat <= rg_forward_beat + 1;
             end
         endrule
-
+        
         //=====================================================
         // Interface
         //=====================================================
         interface put_cache_read_req = toPut(ff_req_from_cache);
         interface get_cache_read_resp = toGet(ff_resp_to_cache);
+        interface put_evict_req = toPut(ff_evict_req);
+
         interface get_mem_read_req = toGet(ff_req_to_mem);
         interface put_mem_read_resp = toPut(ff_resp_from_mem);
         
         interface get_tree_node_req = toGet(ff_tree_req);
         interface put_tree_node_resp = toPut(ff_tree_resp);
+        interface get_tree_write_req = toGet(ff_tree_write);
+        interface put_tree_write_resp = toPut(ff_tree_write_resp);
         
         method Action ma_enable(Bool en);
             rg_mvu_enabled <= en;

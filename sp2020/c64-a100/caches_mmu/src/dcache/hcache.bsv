@@ -65,6 +65,9 @@ interface Ifc_HCache;
     // Protected region management
     method Bool is_protected(Bit#(`paddr) addr);
     method TreeIndex addr_to_leaf_index(Bit#(`paddr) addr);
+    
+    // Tree memory address computation
+    method Bit#(`paddr) get_tree_node_addr(Level level, TreeIndex index);
 endinterface
 
 (* synthesize *)
@@ -76,6 +79,13 @@ module mkHCache(Ifc_HCache);
     // Protected region configuration
     Bit#(`paddr) protected_base = 'h0000_0000;
     Bit#(`paddr) protected_limit = 'h0020_0000; // 2 MB
+
+    // Tree memory region (after data region)
+    // Level 1: 32,768 nodes * 8 bytes = 256 KB at 0x200000
+    // Level 2: 4,096 nodes * 8 bytes = 32 KB at 0x240000
+    Bit#(`paddr) tree_base = 'h0020_0000;
+    Bit#(`paddr) level1_offset = 'h0000_0000;  // 0x200000
+    Bit#(`paddr) level2_offset = 'h0004_0000;  // 0x240000
 
     // Tree configuration
     Integer tree_height = valueOf(TreeHeight);
@@ -160,6 +170,15 @@ module mkHCache(Ifc_HCache);
     
     method TreeIndex addr_to_leaf_index(Bit#(`paddr) addr);
         return addr_to_leaf_index_func(addr);
+    endmethod
+
+    // Compute physical address for tree node at (level, index)
+    // Level 1: base + 0x00000 + index * 8
+    // Level 2: base + 0x40000 + index * 8
+    method Bit#(`paddr) get_tree_node_addr(Level level, TreeIndex index);
+        Bit#(`paddr) level_offset = (level == 1) ? level1_offset : level2_offset;
+        Bit#(`paddr) node_offset = zeroExtend(index) << 3;  // index * 8 bytes
+        return tree_base + level_offset + node_offset;
     endmethod
 
 endmodule

@@ -88,6 +88,11 @@ package dmem;
     method Bit#(`respwidth) mv_ram_response;
 `endif
       // ---------------------------------------------------------//
+      // Tree Interface
+      interface Get#(TreeNodeReq) get_tree_node_req;
+      interface Put#(TreeNodeResp) put_tree_node_resp;
+      interface Get#(TreeNodeWrite) get_tree_write_req;
+      interface Put#(Bool) put_tree_write_resp;
   endinterface
 
   function DCache_core_request#(`vaddr, TMul#(`dwords,8), `desize ) get_cache_packet
@@ -151,12 +156,22 @@ package dmem;
     interface get_read_mem_req = mvu.get_mem_read_req;
     interface put_read_mem_resp = mvu.put_mem_read_resp;
 
+    // Tree Interface connections
+    interface get_tree_node_req = mvu.get_tree_node_req;
+    interface put_tree_node_resp = mvu.put_tree_node_resp;
+    interface get_tree_write_req = mvu.get_tree_write_req;
+    interface put_tree_write_resp = mvu.put_tree_write_resp;
+
     method ma_cache_enable =  dcache.ma_cache_enable;
     method mv_write_mem_req_rd = dcache.mv_write_mem_req;
 `ifdef dcache
     interface put_write_mem_resp = dcache.put_write_mem_resp;
 `endif
-    method ma_write_mem_req_deq = dcache.ma_write_mem_req_deq;
+    method Action ma_write_mem_req_deq;
+       let req = dcache.mv_write_mem_req;
+       mvu.put_evict_req.put(req);
+       dcache.ma_write_mem_req_deq;
+    endmethod
     method ma_perform_store = dcache.ma_perform_store;
     method mv_cacheable_store    =dcache.mv_cacheable_store;
     method mv_cache_available    =dcache.mv_cache_available `ifdef supervisor && dtlb.mv_tlb_available `endif ;

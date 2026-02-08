@@ -1,88 +1,180 @@
 /*
-Tree Memory Module for MVU Testbench
-Provides a mock tree memory that stores sibling nodes for Merkle tree verification testing.
-
-Uses a Vector of Regs instead of RegFile to allow parallel reads.
+Tree Memory Adapter
+Translates abstract tree node requests (level, index) into physical memory requests.
+Integrates with the main memory system via DCache_mem_* interfaces.
 */
 
 package tree_memory;
 
 import FIFOF::*;
+import FIFO::*;
 import GetPut::*;
 import Vector::*;
+import dcache_types::*;
 import mvu::*;
+`include "dcache.defines"
 
-// Total storage: 16 levels * 256 entries = 4096 entries
-typedef 4096 NumEntries;
-typedef TLog#(NumEntries) AddrWidth;
 
-// Entry: {valid, hash}
-typedef Bit#(TAdd#(HashWidth, 1)) Entry;
 
 interface Ifc_TreeMemory;
-    // Request/response for tree node fetches
+    // Tree Read Interface (from MVU)
     interface Put#(TreeNodeReq) put_req;
     interface Get#(TreeNodeResp) get_resp;
+
+    // Tree Write Interface (from MVU or update logic)
+    interface Put#(TreeNodeWrite) put_write_req;
+    interface Get#(Bool) get_write_resp;
+
+    // Memory Interface (to Memory/Interconnect)
+    interface Get#(DCache_mem_readreq#(`paddr)) get_mem_read_req;
+    interface Put#(DCache_mem_readresp#(`dbuswidth)) put_mem_read_resp;
     
-    // Preload nodes for testing (level, index, hash)
-    method Action preload(Level level, TreeIndex index, Bit#(HashWidth) hash);
+    interface Get#(DCache_mem_writereq#(`paddr, `dbuswidth)) get_mem_write_req;
+    interface Put#(Bool) put_mem_write_resp;
 endinterface
 
 (* synthesize *)
 module mkTreeMemory(Ifc_TreeMemory);
-    
-    // Use a vector of registers for storage (allows parallel reads)
-    Vector#(NumEntries, Reg#(Entry)) v_nodes <- replicateM(mkReg(0));
-    
-    FIFOF#(TreeNodeReq) ff_req <- mkFIFOF;
-    FIFOF#(TreeNodeResp) ff_resp <- mkFIFOF;
-    
-    // Pack level and index into storage address
-    function Bit#(AddrWidth) pack_addr(Level level, TreeIndex index);
-        // Use lower bits of level and index
-        Bit#(4) lvl = level;
-        Bit#(8) idx = truncate(index);
-        return truncate({lvl, idx});
+
+    // Input/Output FIFOs
+    FIFOF#(TreeNodeReq) ff_tree_req <- mkFIFOF;
+    FIFOF#(TreeNodeResp) ff_tree_resp <- mkFIFOF;
+    FIFOF#(TreeNodeWrite) ff_tree_write <- mkFIFOF;
+    FIFOF#(Bool) ff_tree_write_resp <- mkFIFOF;
+
+    // Memory Interface FIFOs
+    FIFOF#(DCache_mem_readreq#(`paddr)) ff_mem_read_req <- mkFIFOF;
+    FIFOF#(DCache_mem_readresp#(`dbuswidth)) ff_mem_read_resp <- mkFIFOF;
+    FIFOF#(DCache_mem_writereq#(`paddr, `dbuswidth)) ff_mem_write_req <- mkFIFOF;
+    FIFOF#(Bool) ff_mem_write_resp <- mkFIFOF;
+
+    // Address constants (Must match hcache.bsv)
+    Bit#(`paddr) tree_base = 'h0020_0000;
+    Bit#(`paddr) level1_offset = 'h0000_0000;
+    Bit#(`paddr) level2_offset = 'h0004_0000;
+
+    // Internal state for read accumulation
+    Reg#(UInt#(4)) rg_beat_count <- mkReg(0);
+    Reg#(Vector#(Arity, Bit#(HashWidth))) rg_acc_hashes <- mkReg(replicate(0));
+    Reg#(Vector#(Arity, Bool)) rg_acc_valid <- mkReg(replicate(False));
+    Reg#(TreeNodeReq) rg_current_req <- mkReg(?);
+    Reg#(Bool) rg_processing_read <- mkReg(False);
+
+    // Address calculation helper
+    function Bit#(`paddr) get_node_addr(Level level, TreeIndex index);
+        Bit#(`paddr) level_offset = (level == 1) ? level1_offset : level2_offset;
+        Bit#(`paddr) node_offset = zeroExtend(index) << 3; // 8 bytes per node
+        return tree_base + level_offset + node_offset;
     endfunction
-    
-    // Process requests - read all 8 siblings
-    rule rl_process_req;
-        let req = ff_req.first;
-        ff_req.deq;
+
+    //=====================================================
+    // Read Path
+    //=====================================================
+
+    // 1. Process new read request
+    rule rl_process_read_req(ff_tree_req.notEmpty && !rg_processing_read);
+        let req = ff_tree_req.first;
+        ff_tree_req.deq;
+
+        // Calculate address for the base index (first of 8 siblings)
+        let addr = get_node_addr(req.level, req.base_index);
         
-        Vector#(Arity, Bit#(HashWidth)) hashes = replicate(0);
-        Vector#(Arity, Bool) valid = replicate(False);
+        $display("[TreeMem] Read Req: L%0d[%0d] -> PhysAddr %h", req.level, req.base_index, addr);
+
+        // Issue burst read check for 8 siblings (64 bytes)
+        // burst_len = 7 means 8 beats
+        ff_mem_read_req.enq(DCache_mem_readreq {
+            address: addr,
+            burst_len: 7,
+            burst_size: 3, // 8 bytes (64-bit)
+            io: False
+        });
+
+        rg_current_req <= req;
+        rg_processing_read <= True;
+        rg_beat_count <= 0;
+        rg_acc_hashes <= replicate(0);
+        rg_acc_valid <= replicate(False);
+    endrule
+
+    // 2. Process memory responses
+    rule rl_process_read_resp(rg_processing_read && ff_mem_read_resp.notEmpty);
+        let resp = ff_mem_read_resp.first;
+        ff_mem_read_resp.deq;
+
+        // Accumulate hash
+        Vector#(Arity, Bit#(HashWidth)) hashes = rg_acc_hashes;
+        Vector#(Arity, Bool) valid = rg_acc_valid;
         
-        // Read all 8 siblings
-        for (Integer i = 0; i < valueOf(Arity); i = i + 1) begin
-            TreeIndex idx = req.base_index + fromInteger(i);
-            Bit#(AddrWidth) addr = pack_addr(req.level, idx);
-            Entry entry = v_nodes[addr];
+        hashes[rg_beat_count] = truncate(resp.data);
+        valid[rg_beat_count] = True;
+
+        rg_acc_hashes <= hashes;
+        rg_acc_valid <= valid;
+
+        $display("[TreeMem]   Beat %0d: %h", rg_beat_count, resp.data);
+
+        if (resp.last) begin
+            // Done with burst
+            ff_tree_resp.enq(TreeNodeResp {
+                hashes: hashes,
+                valid: valid
+            });
+            rg_processing_read <= False;
             
-            if (entry[valueOf(HashWidth)] == 1'b1) begin
-                hashes[i] = truncate(entry);
-                valid[i] = True;
-                $display("[TreeMem] Read L%0d[%0d] = %h", req.level, idx, hashes[i]);
-            end else begin
-                $display("[TreeMem] Read L%0d[%0d] = EMPTY", req.level, idx);
-            end
+            // Sanity check
+             if (rg_beat_count != 7) 
+                $display("[TreeMem] ERROR: Received %0d beats, expected 8!", rg_beat_count + 1);
+        end else begin
+            rg_beat_count <= rg_beat_count + 1;
         end
+    endrule
+
+    //=====================================================
+    // Write Path
+    //=====================================================
+
+    rule rl_process_write_req(ff_tree_write.notEmpty);
+        let req = ff_tree_write.first;
+        ff_tree_write.deq;
+
+        let addr = get_node_addr(req.level, req.index);
         
-        ff_resp.enq(TreeNodeResp {
-            hashes: hashes,
-            valid: valid
+        $display("[TreeMem] Write Req: L%0d[%0d] = %h -> PhysAddr %h", 
+                req.level, req.index, req.hash, addr);
+
+        ff_mem_write_req.enq(DCache_mem_writereq {
+            address: addr,
+            data: zeroExtend(req.hash),
+            burst_len: 0, // Single beat
+            burst_size: 3, // 8 bytes
+            io: False
         });
     endrule
-    
-    interface put_req = toPut(ff_req);
-    interface get_resp = toGet(ff_resp);
-    
-    method Action preload(Level level, TreeIndex index, Bit#(HashWidth) hash);
-        Bit#(AddrWidth) addr = pack_addr(level, index);
-        v_nodes[addr] <= {1'b1, hash};
-        $display("[TreeMem] Preload L%0d[%0d] = %h", level, index, hash);
-    endmethod
-    
+
+    rule rl_process_write_resp(ff_mem_write_resp.notEmpty);
+        let resp = ff_mem_write_resp.first;
+        ff_mem_write_resp.deq;
+        ff_tree_write_resp.enq(resp);
+        $display("[TreeMem] Write Complete");
+    endrule
+
+    //=====================================================
+    // Interfaces
+    //=====================================================
+
+    interface put_req = toPut(ff_tree_req);
+    interface get_resp = toGet(ff_tree_resp);
+
+    interface put_write_req = toPut(ff_tree_write);
+    interface get_write_resp = toGet(ff_tree_write_resp);
+
+    interface get_mem_read_req = toGet(ff_mem_read_req);
+    interface put_mem_read_resp = toPut(ff_mem_read_resp);
+
+    interface get_mem_write_req = toGet(ff_mem_write_req);
+    interface put_mem_write_resp = toPut(ff_mem_write_resp);
+
 endmodule
 
 endpackage

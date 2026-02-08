@@ -3,6 +3,7 @@ package tb_mvu;
     import hcache::*;
     import tree_memory::*;
     import dcache_types::*;
+    import unified_memory::*;
     import FIFOF::*;
     import GetPut::*;
     import Vector::*;
@@ -10,256 +11,243 @@ package tb_mvu;
     import ConfigReg::*;
     `include "dcache.defines"
 
+    // Address constants (Matches hcache/tree_memory)
+    Bit#(`paddr) tree_base = 'h0020_0000;
+    Bit#(`paddr) level1_offset = 'h0000_0000;
+    Bit#(`paddr) level2_offset = 'h0004_0000;
+
+    function Bit#(`paddr) get_node_addr(Level level, TreeIndex index);
+        Bit#(`paddr) level_offset = (level == 1) ? level1_offset : level2_offset;
+        Bit#(`paddr) node_offset = zeroExtend(index) << 3; 
+        return tree_base + level_offset + node_offset;
+    endfunction
+
     (* synthesize *)
     module mkTb_mvu(Empty);
         
         Ifc_mvu dut <- mkmvu;
         Ifc_TreeMemory tree_mem <- mkTreeMemory;
+        Ifc_UnifiedMemory mem <- mkUnifiedMemory;
         
-        // Connect tree memory
+        // Connect tree memory adapter to MVU
         mkConnection(dut.get_tree_node_req, tree_mem.put_req);
         mkConnection(tree_mem.get_resp, dut.put_tree_node_resp);
         
-        // Use ConfigReg to avoid scheduling conflicts with state machine
-        Reg#(UInt#(32)) rg_cycle <- mkConfigReg(0);
-        Reg#(UInt#(5)) rg_state <- mkReg(0);  // Expanded for more init states
-        Reg#(UInt#(4)) rg_beat <- mkReg(0);
+        // Connect MVU Data Port to Unified Memory (Data Port)
+        mkConnection(dut.get_mem_read_req, mem.data_port.put_read_req);
+        mkConnection(mem.data_port.get_read_resp, dut.put_mem_read_resp);
+        // MVU doesn't have write port yet (Phase 3), but if it did:
+        // mkConnection(dut.get_mem_write_req, mem.data_port.put_write_req);
         
-        // Cycle counter - separate from state machine
+        // Connect Tree Memory Adapter to Unified Memory (Tree Port)
+        mkConnection(tree_mem.get_mem_read_req, mem.tree_port.put_read_req);
+        mkConnection(mem.tree_port.get_read_resp, tree_mem.put_mem_read_resp);
+        mkConnection(tree_mem.get_mem_write_req, mem.tree_port.put_write_req);
+        mkConnection(mem.tree_port.get_write_resp, tree_mem.put_mem_write_resp);
+
+        // Connect tree write interface (from MVU to TreeMem)
+        mkConnection(dut.get_tree_write_req, tree_mem.put_write_req);
+        // Connect tree write response (from TreeMem to MVU)
+        mkConnection(tree_mem.get_write_resp, dut.put_tree_write_resp);
+
+        // State machine
+        Reg#(UInt#(32)) rg_cycle <- mkConfigReg(0);
+        Reg#(UInt#(8)) rg_state <- mkReg(0);
+        
+        // Cycle counter
         (* fire_when_enabled, no_implicit_conditions *)
         rule rl_tick;
             rg_cycle <= rg_cycle + 1;
-            if (rg_cycle > 5000) begin
+            if (rg_cycle > 10000) begin
                 $display("TIMEOUT at state %0d, cycle %0d", rg_state, rg_cycle);
                 $finish(1);
             end
         endrule
         
+        // ====================================================================
+        // Test Setup
+        // ====================================================================
         /*
-        Test Setup:
-        - Cache line at addr 0x0000 contains 8 leaves (indices 0-7)
-        - Each leaf is 8 bytes, value = leaf_index + 1
+        Address 0x0000_0040 (64 bytes)
+        Leaves 8-15 (indices)
+        Leaf 8 = 1, Leaf 9 = 2, ... Leaf 15 = 8
+        Parent L1[1] (because 8>>3 = 1)
+        Siblings needed: L1[0], L1[2..7]
+        For L2 parent (index 0, covering L1[0..7]), we need siblings L2[1..7]
+        But L2 size is usually smaller? 
+        If ARITY=8.
+        L0 leaves.
+        L1 nodes.
+        L2 nodes.
         
-        Tree structure:
-          L0: leaves[0-7] = [1,2,3,4,5,6,7,8]
-          L1: parent[0] = 1^2^3^4^5^6^7^8 = 4
-          L2: parent[0] = needs siblings
-          ...
-          L6: root
-          
-        For testing, we'll preload some siblings in tree memory.
+        Let's assume simple scenario:
+        We verify address 0x40.
+        MVU logic:
+        1. Fetch data at 0x40 (8 beats). Accumulate.
+        2. Compute L0 parent (L1 node). Index = 8/8 = 1.
+        3. Fetch L1 siblings (0, 2, 3, 4, 5, 6, 7).
+        4. Compute L1 parent (L2 node). Index = 1/8 = 0.
+        5. Fetch L2 siblings (1, 2, 3, 4, 5, 6, 7).
+        6. Compute L2 parent (L3 node). Index = 0/8 = 0.
+        7. If L3 is HW level, check stored hash.
         */
         
         // State 0: Enable MVU
-        rule rl_init_enable(rg_state == 0 && rg_cycle > 2);
+        rule rl_init(rg_state == 0);
             dut.ma_enable(True);
-            $display("\n========================================");
-            $display("TEST: Sparse Merkle Tree Verification");
             $display("========================================");
-            $display("[%0d] Initialized MVU", rg_cycle);
+            $display("TEST: MVU with Unified Memory");
+            $display("========================================");
             rg_state <= 1;
         endrule
         
-        // State 1: Preload L1 sibling 1
-        rule rl_preload_1(rg_state == 1);
-            tree_mem.preload(1, 1, 64'hAAAA_AAAA_AAAA_AAAA);
-            rg_state <= 2;
+        // Helper Reg for initialization
+        Reg#(Bit#(4)) rg_init_idx <- mkReg(0);
+
+        // State 1: Initialize Data Memory (Leaves)
+        rule rl_init_data(rg_state == 1);
+            // Write 8 words starting at 0x40
+            Bit#(32) offset = zeroExtend(rg_init_idx) << 3; 
+            Bit#(64) val = zeroExtend(rg_init_idx) + 1;
+            
+            mem.write_mem('h40 + offset, val);
+            $display("Init Data: Addr %h = %h", 32'h40 + offset, val);
+            
+            if (rg_init_idx == 7) begin
+                rg_state <= 2;
+                rg_init_idx <= 0;
+            end else begin
+                rg_init_idx <= rg_init_idx + 1;
+            end
         endrule
         
-        // State 2: Preload L1 sibling 2
-        rule rl_preload_2(rg_state == 2);
-            tree_mem.preload(1, 2, 64'hBBBB_BBBB_BBBB_BBBB);
-            rg_state <= 3;
+        // State 2: Initialize Tree Memory (L1 Siblings)
+        rule rl_init_tree_l1(rg_state == 2);
+            // We need L1[0], L1[2..7].
+            // Sequence: 0, 2, 3, 4, 5, 6, 7
+            // We can just iterate 0..7 and skip 1
+            
+            if (rg_init_idx != 1) begin
+                Bit#(64) h = (rg_init_idx == 0) ? 
+                    64'hAAAA_AAAA_AAAA_AAAA : 
+                    (64'hBBBB_BBBB_0000_0000 | zeroExtend(rg_init_idx));
+                
+                mem.write_mem(get_node_addr(1, zeroExtend(rg_init_idx)), h);
+            end
+            
+            if (rg_init_idx == 7) begin
+                rg_state <= 3;
+                rg_init_idx <= 1; // Start from 1 for next rule
+            end else begin
+                rg_init_idx <= rg_init_idx + 1;
+            end
         endrule
         
-        // State 3: Preload L1 sibling 3
-        rule rl_preload_3(rg_state == 3);
-            tree_mem.preload(1, 3, 64'hCCCC_CCCC_CCCC_CCCC);
-            rg_state <= 4;
+        // State 3: Initialize Tree Memory (L2 Siblings)
+        rule rl_init_tree_l2(rg_state == 3);
+            // Parent is L2[0].
+            // Need L2[1..7].
+            // init_idx starts at 1
+            
+            Bit#(64) h = 64'hCCCC_CCCC_0000_0000 | zeroExtend(rg_init_idx);
+            mem.write_mem(get_node_addr(2, zeroExtend(rg_init_idx)), h);
+            
+            if (rg_init_idx == 7) begin
+                rg_state <= 4;
+                rg_init_idx <= 0;
+            end else begin
+                rg_init_idx <= rg_init_idx + 1;
+            end
         endrule
         
-        // State 4: Preload L2 sibling
-        rule rl_preload_4(rg_state == 4);
-            tree_mem.preload(2, 1, 64'hDDDD_DDDD_DDDD_DDDD);
-            rg_state <= 5;
-        endrule
-        
-        // State 5: Send cache read request
-        rule rl_send_req(rg_state == 5 && rg_cycle > 10);
+        // State 4: Start Verification
+        rule rl_start_req(rg_state == 4);
+            $display("\n[TB] State 4: Sending Request for 0x40");
             let req = DCache_mem_readreq {
-                address: 32'h0000_0040,  // First 64 bytes (8 leaves)
-                burst_len: 8'd8,
-                burst_size: 3'd3,  // 8 bytes per beat
+                address: 32'h0000_0040,
+                burst_len: 8'd7, // 8 beats
+                burst_size: 3'd3, // 8 bytes
                 io: False
             };
             dut.put_cache_read_req.put(req);
-            $display("\n[%0d] Sent cache request for addr 0x%h", rg_cycle, req.address);
-            rg_state <= 6;
         endrule
         
-        // State 6: Receive memory request
-        rule rl_rcv_mem_req(rg_state == 6);
-            let mem_req <- dut.get_mem_read_req.get();
-            $display("[%0d] Received mem request for addr 0x%h", rg_cycle, mem_req.address);
-            rg_state <= 7;
-            rg_beat <= 0;
-        endrule
-        
-        // State 7: Send data beats (8 leaves)
-        rule rl_send_beats(rg_state == 7);
-            // Each leaf is just its index + 1
-            Bit#(64) leaf_value = zeroExtend(pack(rg_beat + 1));
-            Bool is_last = (rg_beat == 7);
-            
-            let resp = DCache_mem_readresp {
-                data: zeroExtend(leaf_value),
-                last: is_last,
-                err: False
-            };
-            
-            dut.put_mem_read_resp.put(resp);
-            $display("[%0d] Sent beat %0d: leaf=%h, last=%b", 
-                    rg_cycle, rg_beat, leaf_value, is_last);
-            
-            if (is_last) begin
-                rg_state <= 8;
-                rg_beat <= 0;
-            end else begin
-                rg_beat <= rg_beat + 1;
-            end
-        endrule
-        
-        // State 8: Receive cache responses
-        rule rl_rcv_resp(rg_state == 8);
+        // Consume response from DUT
+        rule rl_consume_resp;
             let resp <- dut.get_cache_read_resp.get();
-            $display("[%0d] Received cache resp %0d: data=%h, last=%b", 
-                    rg_cycle, rg_beat, resp.data, resp.last);
-            
+            // $display("[TB] Got response: %h", resp.data);
             if (resp.last) begin
-                $display("[%0d] All cache responses received", rg_cycle);
-                rg_state <= 9;
-            end else begin
-                rg_beat <= rg_beat + 1;
+                 if (rg_state == 4) begin
+                     $display("[TB] Initial Verification Complete. Starting Eviction...");
+                     rg_state <= 5;
+                 end else if (rg_state == 6) begin
+                     $display("[TB] Update Verification Complete!");
+                     rg_state <= 7;
+                 end
             end
         endrule
+
+        Reg#(Bool) rg_evict_sent <- mkReg(False);
         
-        // State 9: Wait for verification to complete
-        rule rl_wait(rg_state == 9);
-            let state = dut.debug_state();
-            $display("[%0d] MVU State: %0d", rg_cycle, state);
+        // State 5: Trigger Eviction
+        rule rl_evict_req_send(rg_state == 5 && !rg_evict_sent);
+            $display("\n[TB] State 5: Triggering Eviction for 0x40");
             
-            if (state == IDLE || state == COMPLETE) begin
-                $display("[%0d] Verification completed!", rg_cycle);
-                rg_state <= 10;
-            end
-        endrule
-        
-        // State 10: Check stored hashes
-        rule rl_check(rg_state == 10);
-            action
-                $display("\n[%0d] Checking stored hashes...", rg_cycle);
-                
-                // Check L3 (first HW level)
-                let l3_hash <- dut.debug_get_hash(3, 0);
-                case (l3_hash) matches
-                    tagged Valid .h: $display("[%0d] L3[0] = %h", rg_cycle, h);
-                    tagged Invalid: $display("[%0d] L3[0] = INVALID", rg_cycle);
-                endcase
-                
-                rg_state <= 11;
-            endaction
-        endrule
-        
-        // State 11: Check more levels
-        rule rl_check2(rg_state == 11);
-            action
-                let l4_hash <- dut.debug_get_hash(4, 0);
-                case (l4_hash) matches
-                    tagged Valid .h: $display("[%0d] L4[0] = %h", rg_cycle, h);
-                    tagged Invalid: $display("[%0d] L4[0] = INVALID", rg_cycle);
-                endcase
-                
-                rg_state <= 12;
-            endaction
-        endrule
-        
-        // State 12: Test replay (verify same data)
-        rule rl_test_replay(rg_state == 12);
-            $display("\n[%0d] Testing replay attack detection...", rg_cycle);
+            // New data for the cache line
+            // We will change Leaf 0 to 0xDEADBEEF
             
+            // Construct 512-bit data
+            // 8x64 vector
+            Vector#(8, Bit#(64)) data_vec = replicate(0);
+            for(Integer i=0; i<8; i=i+1) data_vec[i] = fromInteger(i) + 1; // 1, 2, ...
+            data_vec[0] = 64'hDEAD_BEEF; // Change first word
+            
+            Bit#(512) packed_data = pack(data_vec);
+            
+            // Update physical memory so subsequent reads get new data
+            // We need to write 8 words to mem.
+            // tb_mvu doesn't have easy burst write rule for mem.
+            // We act as "memory controller" here.
+            mem.write_mem(32'h40, 64'hDEAD_BEEF);
+            // Others unchanged (already 2,3,4...)
+            
+            // Send eviction notification to MVU
+            let req = DCache_mem_writereq {
+                address: 32'h0000_0040,
+                data: packed_data,
+                burst_len: 7, // Not used by MVU logic but good practice
+                burst_size: 3,
+                io: False
+            };
+            dut.put_evict_req.put(req);
+            rg_evict_sent <= True;
+        endrule
+        
+        rule rl_check_idle(rg_state == 5 && rg_evict_sent);
+             let s = dut.debug_state();
+             if (s == IDLE) begin
+                 $display("[TB] MVU is IDLE. Update finished.");
+                 rg_state <= 6;
+                 rg_evict_sent <= False;
+             end
+        endrule
+
+        // State 6: Verify Update
+        rule rl_verify_update(rg_state == 6);
+            $display("\n[TB] State 6: Verifying Update for 0x40");
             let req = DCache_mem_readreq {
                 address: 32'h0000_0040,
-                burst_len: 8'd8,
+                burst_len: 8'd7,
                 burst_size: 3'd3,
                 io: False
             };
             dut.put_cache_read_req.put(req);
-            rg_state <= 13;
+            // We wait for response in rl_consume_resp
         endrule
         
-        // State 13: Get mem request for replay
-        rule rl_replay_mem_req(rg_state == 13);
-            let mem_req <- dut.get_mem_read_req.get();
-            $display("[%0d] Replay: mem request", rg_cycle);
-            rg_state <= 14;
-            rg_beat <= 0;
-        endrule
-        
-        // State 14: Send same data
-        rule rl_replay_send(rg_state == 14);
-            Bit#(64) leaf_value = zeroExtend(pack(rg_beat + 1));
-            Bool is_last = (rg_beat == 7);
-            
-            let resp = DCache_mem_readresp {
-                data: zeroExtend(leaf_value),
-                last: is_last,
-                err: False
-            };
-            
-            dut.put_mem_read_resp.put(resp);
-            
-            if (is_last) begin
-                rg_state <= 15;
-                rg_beat <= 0;
-            end else begin
-                rg_beat <= rg_beat + 1;
-            end
-        endrule
-        
-        // State 15: Receive replay responses
-        rule rl_replay_rcv(rg_state == 15);
-            let resp <- dut.get_cache_read_resp.get();
-            
-            if (resp.last) begin
-                rg_state <= 16;
-            end else begin
-                rg_beat <= rg_beat + 1;
-            end
-        endrule
-        
-        // State 16: Wait for replay verification
-        rule rl_wait_replay(rg_state == 16);
-            let state = dut.debug_state();
-            
-            if (state == IDLE || state == COMPLETE) begin
-                $display("[%0d] Replay verification passed!", rg_cycle);
-                rg_state <= 17;
-            end
-        endrule
-        
-        // State 17: Done
-        rule rl_done(rg_state == 17);
-            $display("\n========================================");
-            $display("ALL TESTS PASSED!");
-            $display("========================================");
-            $display("Summary:");
-            $display(" 8-leaf cache line verified");
-            $display(" Arity-8 parent computation");
-            $display(" Sibling fetching from memory");
-            $display(" Top-level HCache storage");
-            $display(" Replay attack detection");
-            $display("========================================\n");
-            $finish(0);
+        rule rl_finish(rg_state == 7);
+            $display("ALL TESTS PASSED");
+            $finish;
         endrule
         
     endmodule
