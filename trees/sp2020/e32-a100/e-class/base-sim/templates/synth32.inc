@@ -1,0 +1,39 @@
+ISA=RV32IMAC
+MUL=asic
+SYNTH=ASIC
+VERBOSITY=0
+USERTRAPS=enable
+USER=enable
+COREFABRIC=AXI4Lite
+MULSTAGES=4
+DIVSTAGES=32
+FPGA=xc7a100tcsg324-1
+SYNTHTOP=mkriscv
+PADDR=32
+RESETPC=4096
+ARITHTRAP=disable
+
+CAUSESIZE=6
+DEBUG=enable
+OPENOCD=disable
+DTVEC_BASE=0
+
+# Verilator options
+COVERAGE=none
+TRACE=disable
+THREADS=1
+VERILATESIM=fast
+
+# DebugOptions
+RTLDUMP=disable
+ASSERTIONS=disable
+
+# Trigger Setup
+TRIGGERS=2
+
+# performance counters
+COUNTERS=4
+
+# pmp
+PMP=enable
+PMPSIZE=4
