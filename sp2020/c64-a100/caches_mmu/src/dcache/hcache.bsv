@@ -77,13 +77,13 @@ module mkHCache(Ifc_HCache);
     RegFile#(Bit#(HAddrWidth), Bit#(TAdd#(HashWidth,1))) rf_nodes <- mkRegFileFull;
 
     // Protected region configuration
-    Bit#(`paddr) protected_base = 'h8000_0000;
-    Bit#(`paddr) protected_limit = 'h8020_0000; // 2 MB
+    Bit#(`paddr) protected_base = 'h8500_0000;
+    Bit#(`paddr) protected_limit = 'h8520_0000; // 2 MB
 
     // Tree memory region (after data region)
     // Level 1: 32,768 nodes * 8 bytes = 256 KB at 0x200000
     // Level 2: 4,096 nodes * 8 bytes = 32 KB at 0x240000
-    Bit#(`paddr) tree_base = 'h8020_0000;
+    Bit#(`paddr) tree_base = 'h8520_0000;
     Bit#(`paddr) level1_offset = 'h0000_0000;  // 0x200000
     Bit#(`paddr) level2_offset = 'h0004_0000;  // 0x240000
 

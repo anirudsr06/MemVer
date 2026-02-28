@@ -48,7 +48,7 @@ module mkTreeMemory(Ifc_TreeMemory);
     FIFOF#(Bool) ff_mem_write_resp <- mkFIFOF;
 
     // Address constants (Must match hcache.bsv)
-    Bit#(`paddr) tree_base = 'h8020_0000;
+    Bit#(`paddr) tree_base = 'h8520_0000;
     Bit#(`paddr) level1_offset = 'h0000_0000;
     Bit#(`paddr) level2_offset = 'h0004_0000;
 

@@ -135,16 +135,21 @@ endinterface
         Reg#(Vector#(Arity, Bool)) rg_node_valid <- mkReg(replicate(False));
         Reg#(Bit#(HashWidth)) rg_computed_parent <- mkReg(0);
 
-        Reg#(Vector#(Arity, DCache_mem_readresp#(`dbuswidth))) rg_buffered_responses <- mkReg(replicate(?));
+        // Error flag: set when hash mismatch is detected; cleared after forwarding responses
+        Reg#(Bool) rg_mvu_error <- mkReg(False);
+
+        // Vector of registers to store leaves and buffered responses
+        Vector#(Arity, Reg#(Bit#(HashWidth))) rg_leaves <- replicateM(mkReg(0));
+        Vector#(Arity, Reg#(DCache_mem_readresp#(`dbuswidth))) rg_buffered_responses <- replicateM(mkReg(unpack(0)));
         Reg#(UInt#(4)) rg_forward_beat <- mkReg(0);
 
         Ifc_HCache hcache <- mkHCache;
 
-        // Hash function: XOR all 8 children (placeholder for real hash)
+        // Hash function: Add all 8 children (better placeholder than XOR for bursts)
         function Bit#(HashWidth) compute_hash(Vector#(Arity, Bit#(HashWidth)) children);
             Bit#(HashWidth) result = 0;
             for (Integer i = 0; i < valueOf(Arity); i = i + 1)
-                result = result ^ children[i];
+                result = result + children[i];
             return result;
         endfunction
 
@@ -179,8 +184,9 @@ endinterface
                 
                 // Extract 8 leaves from 512-bit data
                 // Assuming data is vector of 8x64 bits packed
-                Vector#(Arity, Bit#(HashWidth)) leaves = unpack(req.data);
-                rg_leaves <= leaves;
+                Vector#(Arity, Bit#(HashWidth)) leaves_data = unpack(req.data);
+                for (Integer i = 0; i < valueOf(Arity); i = i + 1)
+                    rg_leaves[i] <= leaves_data[i];
                 
                 rg_state <= COMPUTE_L0_PARENT;
                 
@@ -211,7 +217,10 @@ endinterface
                 rg_is_update <= False; // Ensure read mode
                 rg_base_leaf_index <= leaf_idx;
                 rg_beat_count <= 0;
-                rg_leaves <= replicate(0);
+                for (Integer i = 0; i < valueOf(Arity); i = i + 1) begin
+                    rg_leaves[i] <= 0;
+                    rg_buffered_responses[i] <= unpack(0);
+                end
                 rg_state <= ACCUMULATING;
                 
                 $display("[MVU] Start verification: addr=%h, base_leaf_idx=%0d", 
@@ -239,13 +248,8 @@ endinterface
                 // Each beat is one leaf (8 bytes)
                 Bit#(HashWidth) leaf_hash = truncate(resp.data);
                 
-                Vector#(Arity, Bit#(HashWidth)) leaves = rg_leaves;
-                leaves[rg_beat_count] = leaf_hash;
-                rg_leaves <= leaves;
-                
-                Vector#(Arity, DCache_mem_readresp#(`dbuswidth)) buffered = rg_buffered_responses;
-                buffered[rg_beat_count] = resp;
-                rg_buffered_responses <= buffered;
+                rg_leaves[rg_beat_count] <= leaf_hash;
+                rg_buffered_responses[rg_beat_count] <= resp;
 
                 $display("[MVU] Leaf[%0d] = %h", rg_beat_count, leaf_hash);
 
@@ -274,8 +278,11 @@ endinterface
         // RULE: Compute Level 0 parent from 8 leaves
         //=====================================================
         rule rl_compute_l0_parent(rg_state == COMPUTE_L0_PARENT);
+            Vector#(Arity, Bit#(HashWidth)) leaves = replicate(0);
+            for (Integer i = 0; i < valueOf(Arity); i = i + 1)
+                leaves[i] = rg_leaves[i];
 
-            let parent_hash = compute_hash(rg_leaves);
+            let parent_hash = compute_hash(leaves);
 
             // Parent index: base_leaf_index / 8
             TreeIndex parent_idx = rg_base_leaf_index >> 3;
@@ -411,11 +418,16 @@ endinterface
                                 rg_current_level, rg_current_index);
                     end
                     tagged Valid .h: begin
-                        // Verify against stored
-                        dynamicAssert(h == rg_computed_parent, 
-                                    "Hash mismatch");
-                        $display("[MVU] Hash verified at L%0d[%0d]", 
-                                rg_current_level, rg_current_index);
+                        // Verify against stored hash
+                        if (h != rg_computed_parent) begin
+                            // Signal hardware error -- will cause err=True on cache response
+                            rg_mvu_error <= True;
+                            $display("[MVU] HASH MISMATCH at L%0d[%0d]: stored=%h computed=%h",
+                                    rg_current_level, rg_current_index, h, rg_computed_parent);
+                        end else begin
+                            $display("[MVU] Hash verified at L%0d[%0d]", 
+                                    rg_current_level, rg_current_index);
+                        end
                     end
                 endcase
             end
@@ -505,9 +517,13 @@ endinterface
         //=====================================================
         rule rl_verify_root(rg_state == VERIFY_ROOT);
             if (rg_trusted_root != 0) begin
-                dynamicAssert(rg_computed_parent == rg_trusted_root,
-                            "ROOT VERIFICATION FAILED!");
-                $display("[MVU] ROOT VERIFIED: %h", rg_computed_parent);
+                if (rg_computed_parent != rg_trusted_root) begin
+                    rg_mvu_error <= True;
+                    $display("[MVU] ROOT MISMATCH: computed=%h trusted=%h",
+                            rg_computed_parent, rg_trusted_root);
+                end else begin
+                    $display("[MVU] ROOT VERIFIED: %h", rg_computed_parent);
+                end
             end else begin
                 $display("[MVU] Root computed (no trusted root set): %h", rg_computed_parent);
             end
@@ -519,11 +535,12 @@ endinterface
         // RULE: Complete verification
         //=====================================================
         rule rl_complete(rg_state == COMPLETE);
-            $display("[MVU] Operation complete\n");
+            $display("[MVU] Operation complete (error=%b)\n", rg_mvu_error);
             
             if (rg_is_update) begin
                  rg_state <= IDLE;
                  rg_is_update <= False;
+                 rg_mvu_error <= False; // Clear error after update path
             end else begin
                  rg_state <= FORWARD_TO_CACHE;
             end
@@ -555,11 +572,17 @@ endinterface
         //=====================================================
         rule rl_forward_verified(rg_state == FORWARD_TO_CACHE);
             let resp = rg_buffered_responses[rg_forward_beat];
-            ff_resp_to_cache.enq(resp);
+            // If a hash mismatch was detected, poison all beats with err=True
+            // so the dcache will signal a Load Access Fault to the core.
+            let forwarded_resp = resp;
+            if (rg_mvu_error)
+                forwarded_resp = DCache_mem_readresp { data: resp.data, last: resp.last, err: True };
+            ff_resp_to_cache.enq(forwarded_resp);
             
-            $display("[MVU] Forwarding verified beat %0d to cache", rg_forward_beat);
+            $display("[MVU] Forwarding beat %0d to cache (err=%b)", rg_forward_beat, rg_mvu_error);
             
             if (resp.last) begin
+                rg_mvu_error <= False; // Clear after forwarding all beats
                 rg_state <= IDLE;
                 rg_pending_req <= tagged Invalid;
                 rg_from_protected <= False;
