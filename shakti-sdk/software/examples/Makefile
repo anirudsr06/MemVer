@@ -151,9 +151,6 @@ ifeq ($(PROGRAM),all)
 	cd ./xadc_applns && $(MAKE) all TARGET=$(TARGET)
 	cd ./eth_test && $(MAKE) all TARGET=$(TARGET)
 else
-ifeq ($(PROGRAM),mvu_test)
-filepath := mvu_test/mvu_test
-else
 ifeq ($(PROGRAM),loopback)
 filepath := uart_applns/loopback
 else
@@ -468,7 +465,6 @@ ifeq ($(PROGRAM),)
 	cd $(filepath)/../ && $(MAKE) clean CLEAR=$(CLEAR)
 else
 	cd $(filepath)/../ && $(MAKE) clean PROGRAM=$(PROGRAM) CLEAR=$(CLEAR)
-endif
 endif
 endif
 endif

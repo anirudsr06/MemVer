@@ -31,7 +31,7 @@ export GENLIB
 
 # Default PROGRAM and TARGET
 PROGRAM ?= 
-TARGET ?= artix7_100t
+TARGET ?= pinaka
 DEBUG ?= DEBUG
 CLEAR ?=
 UPLOAD ?= UPLOAD

@@ -18,7 +18,7 @@ openocd ?= $(shell which openocd)
 
 GENLIB:=$(shell pwd)/
 
-all: check library do finish run_gdb
+all: check library do run_gdb finish
 	@echo "All done"
 
 check:
@@ -88,11 +88,7 @@ else
 ifeq ($(PROGRAM),paranoia)
 	@$(eval filepath := ./paranoia)
 else
-ifeq ($(PROGRAM),custom_test)
-	@$(eval filepath := ./custom_test)
-else
 	@echo "Entry for $(PROGRAM) not present"
-endif
 endif
 endif
 endif
@@ -102,19 +98,15 @@ endif
 
 .PHONY: run_gdb
 run_gdb: library do
-	@set -e; \
-	echo "Starting OpenOCD and running $(PROGRAM) on RAM using GDB..."; \
-	echo $(openocd); \
-	cd $(shell pwd)/../../bsp/third_party/artix7_100t && $(openocd) -f ftdi.cfg & \
-	OPENOCD_PID=$$!; \
-	trap "echo 'Killing OpenOCD (PID $$OPENOCD_PID)'; kill $$OPENOCD_PID 2>/dev/null; wait $$OPENOCD_PID 2>/dev/null; exit" EXIT INT TERM; \
-	sleep 2; \
-	riscv-none-elf-gdb -ex "set remotetimeout unlimited" \
-	                   -ex "target remote localhost:3333" \
-	                   -ex "file $(GENLIB)$(PROGRAM)/output/$(PROGRAM).shakti" \
-	                   -ex "load" \
-	                   -ex "c"; \
-	kill $$OPENOCD_PID 2>/dev/null; wait $$OPENOCD_PID 2>/dev/null || true
+	@echo "Starting OpenOCD and running $(PROGRAM) on RAM using GDB..."
+	@echo $(openocd)
+	@cd $(shell pwd)/../../bsp/third_party/artix7_100t && $(openocd) -f ftdi.cfg & 
+	@sleep 2  # wait for OpenOCD to initialize
+	@riscv-none-elf-gdb -ex "set remotetimeout unlimited" \
+	                              -ex "target remote localhost:3333" \
+	                              -ex "file $(GENLIB)$(PROGRAM)/output/$(PROGRAM).shakti" \
+	                              -ex "load" \
+	                              -ex "c"
 
 finish:
 	@if [ "$(PROGRAM)" = "all" ]; then \
