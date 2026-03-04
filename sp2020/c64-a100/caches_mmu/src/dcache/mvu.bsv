@@ -122,9 +122,7 @@ endinterface
         // State machine
         Reg#(VerifyState) rg_state <- mkReg(IDLE);
 
-        // Leaf accumulation (8 leaves from cache line)
-        Reg#(Vector#(Arity, Bit#(HashWidth))) rg_leaves <- mkReg(replicate(0));
-        Reg#(UInt#(4)) rg_beat_count <- mkReg(0);
+
 
         // Current verification path
         Reg#(Level) rg_current_level <- mkReg(0);
@@ -138,9 +136,15 @@ endinterface
         // Error flag: set when hash mismatch is detected; cleared after forwarding responses
         Reg#(Bool) rg_mvu_error <- mkReg(False);
 
+        // The hash computed for the current node at the current level.
+        // This is the value that should be STORED in tree memory at the current (level, index).
+        // It is separate from rg_computed_parent, which holds the PARENT's hash.
+        Reg#(Bit#(HashWidth)) rg_my_node_hash <- mkReg(0);
+
         // Vector of registers to store leaves and buffered responses
         Vector#(Arity, Reg#(Bit#(HashWidth))) rg_leaves <- replicateM(mkReg(0));
         Vector#(Arity, Reg#(DCache_mem_readresp#(`dbuswidth))) rg_buffered_responses <- replicateM(mkReg(unpack(0)));
+        Reg#(UInt#(4)) rg_beat_count <- mkReg(0);
         Reg#(UInt#(4)) rg_forward_beat <- mkReg(0);
 
         Ifc_HCache hcache <- mkHCache;
@@ -217,6 +221,7 @@ endinterface
                 rg_is_update <= False; // Ensure read mode
                 rg_base_leaf_index <= leaf_idx;
                 rg_beat_count <= 0;
+                rg_mvu_error <= False; // Clear error flag for new verification session
                 for (Integer i = 0; i < valueOf(Arity); i = i + 1) begin
                     rg_leaves[i] <= 0;
                     rg_buffered_responses[i] <= unpack(0);
@@ -290,6 +295,9 @@ endinterface
             $display("[MVU] L0 parent[%0d] = %h (from leaves %0d-%0d)",
                     parent_idx, parent_hash,
                     rg_base_leaf_index, rg_base_leaf_index + 7);
+
+            // Save this node's own hash (the L1 node value)
+            rg_my_node_hash <= parent_hash;
 
             // Setup for next level
             rg_current_level <= 1;
@@ -394,6 +402,11 @@ endinterface
             
             let parent_hash = compute_hash(children);
             rg_computed_parent <= parent_hash;
+            // Save this node's own hash: this is what should be stored/checked
+            // at the CURRENT level. rg_my_node_hash was set by the previous
+            // level (or rl_compute_l0_parent), but now we update it to the
+            // current level's node value (= parent_hash of children).
+            rg_my_node_hash <= parent_hash;
             
             $display("[MVU] Computed parent = %h", parent_hash);
             if (rg_is_update)
@@ -445,7 +458,8 @@ endinterface
         //=====================================================
         rule rl_update_node(rg_state == UPDATE_NODE);
             if (hcache.is_hw_level(rg_current_level)) begin
-                // Update HW hash
+                // Update HW hash — at HW levels, rg_computed_parent holds the
+                // hash of all children at this level (= this node's value).
                 hcache.set_hash(rg_current_level, rg_current_index, rg_computed_parent);
                 $display("[MVU] UPDATE: Updated HW Hash at L%0d[%0d] = %h", 
                         rg_current_level, rg_current_index, rg_computed_parent);
@@ -457,14 +471,15 @@ endinterface
                     rg_state <= PROPAGATE_UP;
                 end
             end else begin
-                // Write to tree memory
+                // Write to tree memory — use rg_my_node_hash which is the
+                // hash computed for THIS level's node (NOT the parent's hash).
                 ff_tree_write.enq(TreeNodeWrite {
                     level: rg_current_level,
                     index: rg_current_index,
-                    hash: rg_computed_parent
+                    hash: rg_my_node_hash
                 });
                 $display("[MVU] UPDATE: Wrote Tree Node L%0d[%0d] = %h", 
-                        rg_current_level, rg_current_index, rg_computed_parent);
+                        rg_current_level, rg_current_index, rg_my_node_hash);
                 
                 // Wait for acknowledgment
                 rg_state <= WAIT_UPDATE_ACK;

@@ -10,11 +10,11 @@ volatile uint64_t *custom_mtime_ptr = (volatile uint64_t *)MTIME_ADDR;
 
 void main()
 {
-	int array1[100];  /* Use less than 8000 size array to reduce cache misses */
+	int* array1 = (int *)0x80800000;  /* Use less than 8000 size array to reduce cache misses */
 	uint64_t start = *custom_mtime_ptr;
 	for (int j = 0; j <= 10000; j++) 
 	{
-        	for (int i = 0; i < 100; i++) 
+        	for (int i = 0; i < 40; i++) 
 		{
         		array1[i] = i;
     		}
@@ -22,11 +22,11 @@ void main()
     	uint64_t end = *custom_mtime_ptr;
     	printf("Assignment Execution time: %lu ticks\n", end - start);
     	
-    	int array2[100];
+    	int* array2 = (int *)0x82004040;
 	uint64_t start1 = *custom_mtime_ptr;
 	for (int j = 0; j <= 10000; j++) 
 	{
-        	for (int i = 0; i < 100; i++) 
+        	for (int i = 0; i < 40; i++) 
 		{
         		array2[i] = array1[i];
     		}

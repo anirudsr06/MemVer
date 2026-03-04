@@ -164,6 +164,8 @@ package ccore;
 
     Reg#(Maybe#(AXI4_Rd_Addr#(`paddr, 0))) rg_read_line_req <- mkReg(tagged Invalid);
     Reg#(Maybe#(Bit#(`paddr))) wr_write_req <- mkReg(tagged Invalid);
+    
+    Reg#(Bit#(8)) rg_tree_burst_count <- mkReg(0);
 
     // Currently it is possible that the cache can generate a write - request followed by a
     // read - request, but the fabric (due to contention) latches the read first to the slave followed
@@ -318,10 +320,18 @@ rg_shift_amount:%d",hartid, req.data, rg_burst_count, last, rg_shift_amount))
     endrule
 
     // Tree Write Request: DCache_mem_writereq -> AXI4 Write Address + Data
-    rule rl_handle_tree_write_request;
-      let req <- dmem.get_tree_write_mem_req.get;
+    rule rl_handle_tree_write_request (rg_tree_burst_count == 0);
+      let req = dmem.mv_tree_write_mem_req_rd;
+      if(req.burst_len > 0)
+        rg_tree_burst_count <= rg_tree_burst_count + 1;
+      else begin
+        dmem.ma_tree_write_mem_req_deq;
+      end
+      
+      Bit#(`paddr) aw_addr = {req.address[valueOf(`paddr)-1:6], 6'b0}; // Align to 64-byte boundary
+      
       AXI4_Wr_Addr#(`paddr, 0) aw = AXI4_Wr_Addr {
-        awaddr  : truncate(req.address),
+        awaddr  : aw_addr,
         awuser  : 0,
         awlen   : req.burst_len,
         awsize  : zeroExtend(req.burst_size[1:0]),
@@ -329,15 +339,47 @@ rg_shift_amount:%d",hartid, req.data, rg_burst_count, last, rg_shift_amount))
         awid    : 0,
         awprot  : {1'b0, 1'b0, curr_priv[1]}
       };
+      
+      Bit#(3) target_beat = truncate(req.address >> 3);
+      Bit#(TDiv#(ELEN, 8)) write_strobe = (0 == target_beat) ? '1 : 0; 
+      
       let w = AXI4_Wr_Data {
-        wdata : truncate(req.data),
-        wstrb : '1,
-        wlast : True,  // Single beat write
+        wdata : (0 == target_beat) ? truncate(req.data) : 0,
+        wstrb : write_strobe,
+        wlast : req.burst_len == 0,  
         wid   : 0
       };
       tree_xactor.i_wr_addr.enq(aw);
       tree_xactor.i_wr_data.enq(w);
       `logLevel( core, 1, $format("[%2d]CORE : Tree Write Request ",hartid, fshow(aw)))
+    endrule
+
+    // Tree Burst Write Data
+    rule rl_tree_burst_write_data (rg_tree_burst_count != 0);
+      let req = dmem.mv_tree_write_mem_req_rd;
+      Bool last = rg_tree_burst_count == req.burst_len;
+      
+      Bit#(3) target_beat = truncate(req.address >> 3);
+      Bit#(3) current_beat = truncate(rg_tree_burst_count);
+      Bit#(TDiv#(ELEN, 8)) write_strobe = (current_beat == target_beat) ? '1 : 0;
+
+      let w = AXI4_Wr_Data {
+        wdata : (current_beat == target_beat) ? truncate(req.data) : 0, 
+        wstrb : write_strobe, 
+        wlast : last,
+        wid   : 0
+      };
+      
+      if(last) begin
+        rg_tree_burst_count <= 0;
+        dmem.ma_tree_write_mem_req_deq;
+      end
+      else begin
+        rg_tree_burst_count <= rg_tree_burst_count + 1;
+      end
+      
+      tree_xactor.i_wr_data.enq(w);
+      `logLevel( core, 1, $format("[%2d]CORE : Tree Write Data Burst Data: %h rg_burst_count: %d last: %b",hartid, req.data, rg_tree_burst_count, last))
     endrule
 
     // Tree Write Response: AXI4 Write Response -> Bool ack

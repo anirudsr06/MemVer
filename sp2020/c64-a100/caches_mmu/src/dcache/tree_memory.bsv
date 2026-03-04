@@ -28,7 +28,8 @@ interface Ifc_TreeMemory;
     interface Get#(DCache_mem_readreq#(`paddr)) get_mem_read_req;
     interface Put#(DCache_mem_readresp#(`dbuswidth)) put_mem_read_resp;
     
-    interface Get#(DCache_mem_writereq#(`paddr, `dbuswidth)) get_mem_write_req;
+    method DCache_mem_writereq#(`paddr, TMul#(`dblocks, TMul#(`dwords, 8))) mv_mem_write_req;
+    method Action ma_mem_write_req_deq;
     interface Put#(Bool) put_mem_write_resp;
 endinterface
 
@@ -44,7 +45,7 @@ module mkTreeMemory(Ifc_TreeMemory);
     // Memory Interface FIFOs
     FIFOF#(DCache_mem_readreq#(`paddr)) ff_mem_read_req <- mkFIFOF;
     FIFOF#(DCache_mem_readresp#(`dbuswidth)) ff_mem_read_resp <- mkFIFOF;
-    FIFOF#(DCache_mem_writereq#(`paddr, `dbuswidth)) ff_mem_write_req <- mkFIFOF;
+    FIFOF#(DCache_mem_writereq#(`paddr, TMul#(`dblocks, TMul#(`dwords, 8)))) ff_mem_write_req <- mkFIFOF;
     FIFOF#(Bool) ff_mem_write_resp <- mkFIFOF;
 
     // Address constants (Must match hcache.bsv)
@@ -54,8 +55,8 @@ module mkTreeMemory(Ifc_TreeMemory);
 
     // Internal state for read accumulation
     Reg#(UInt#(4)) rg_beat_count <- mkReg(0);
-    Reg#(Vector#(Arity, Bit#(HashWidth))) rg_acc_hashes <- mkReg(replicate(0));
-    Reg#(Vector#(Arity, Bool)) rg_acc_valid <- mkReg(replicate(False));
+    Vector#(Arity, Reg#(Bit#(HashWidth))) rg_acc_hashes <- replicateM(mkReg(0));
+    Vector#(Arity, Reg#(Bool)) rg_acc_valid <- replicateM(mkReg(False));
     Reg#(TreeNodeReq) rg_current_req <- mkReg(?);
     Reg#(Bool) rg_processing_read <- mkReg(False);
 
@@ -92,8 +93,10 @@ module mkTreeMemory(Ifc_TreeMemory);
         rg_current_req <= req;
         rg_processing_read <= True;
         rg_beat_count <= 0;
-        rg_acc_hashes <= replicate(0);
-        rg_acc_valid <= replicate(False);
+        for (Integer i = 0; i < valueOf(Arity); i = i + 1) begin
+            rg_acc_hashes[i] <= 0;
+            rg_acc_valid[i] <= False;
+        end
     endrule
 
     // 2. Process memory responses
@@ -101,32 +104,27 @@ module mkTreeMemory(Ifc_TreeMemory);
         let resp = ff_mem_read_resp.first;
         ff_mem_read_resp.deq;
 
-        // Accumulate hash
-        Vector#(Arity, Bit#(HashWidth)) hashes = rg_acc_hashes;
-        Vector#(Arity, Bool) valid = rg_acc_valid;
-        
-        // Assume valid if we got data (memory always returns something)
-        // Check if we requested this sibling via mask?
-        // The mask in TreeNodeReq tells us which siblings we *wanted*, 
-        // but we fetch all 8 anyway because they are in one cache line.
-        // We mark them valid here, MVU will filter by mask if needed, 
-        // OR we can filter here.
-        // MVU implementation: "Merge received siblings with our computed node"
-        // MVU logic: if (resp.valid[i]) group[i] = resp.hashes[i];
-        
-        hashes[rg_beat_count] = truncate(resp.data);
-        valid[rg_beat_count] = True;
-
-        rg_acc_hashes <= hashes;
-        rg_acc_valid <= valid;
+        rg_acc_hashes[rg_beat_count] <= truncate(resp.data);
+        rg_acc_valid[rg_beat_count] <= True;
 
         $display("[TreeMem]   Beat %0d: %h", rg_beat_count, resp.data);
 
         if (resp.last) begin
             // Done with burst
+            Vector#(Arity, Bit#(HashWidth)) hashes = replicate(0);
+            Vector#(Arity, Bool) v = replicate(False);
+            for (Integer i = 0; i < valueOf(Arity); i = i + 1) begin
+                hashes[i] = rg_acc_hashes[i];
+                v[i] = rg_acc_valid[i];
+            end
+            // Ensure the CURRENT beat is included in the output vector 
+            // since rg_acc_hashes update is not visible until next cycle
+            hashes[rg_beat_count] = truncate(resp.data);
+            v[rg_beat_count] = True;
+
             ff_tree_resp.enq(TreeNodeResp {
                 hashes: hashes,
-                valid: valid
+                valid: v
             });
             rg_processing_read <= False;
             
@@ -152,10 +150,10 @@ module mkTreeMemory(Ifc_TreeMemory);
                 req.level, req.index, req.hash, addr);
 
         ff_mem_write_req.enq(DCache_mem_writereq {
-            address: addr,
-            data: zeroExtend(req.hash),
-            burst_len: 0, // Single beat
-            burst_size: 3, // 8 bytes
+            address: {addr[`paddr-1:6], 6'b0}, // Align to 64-byte block
+            data: zeroExtend(req.hash) << ({addr[5:3], 6'b0}), // Shift hash to correct 8-byte lane in 64-byte block
+            burst_len: fromInteger(valueOf(`dblocks)-1), // 8 beats
+            burst_size: fromInteger(valueOf(TLog#(`dwords))), // 8 bytes per beat
             io: False
         });
     endrule
@@ -180,7 +178,14 @@ module mkTreeMemory(Ifc_TreeMemory);
     interface get_mem_read_req = toGet(ff_mem_read_req);
     interface put_mem_read_resp = toPut(ff_mem_read_resp);
 
-    interface get_mem_write_req = toGet(ff_mem_write_req);
+    method DCache_mem_writereq#(`paddr, TMul#(`dblocks, TMul#(`dwords, 8))) mv_mem_write_req;
+        return ff_mem_write_req.first;
+    endmethod
+
+    method Action ma_mem_write_req_deq;
+        ff_mem_write_req.deq;
+    endmethod
+    
     interface put_mem_write_resp = toPut(ff_mem_write_resp);
 
 endmodule

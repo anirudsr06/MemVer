@@ -92,7 +92,8 @@ package dmem;
       // Tree Memory Interface (physical memory read/write for tree nodes)
       interface Get#(DCache_mem_readreq#(`paddr)) get_tree_read_mem_req;
       interface Put#(DCache_mem_readresp#(`dbuswidth)) put_tree_read_mem_resp;
-      interface Get#(DCache_mem_writereq#(`paddr, `dbuswidth)) get_tree_write_mem_req;
+      method DCache_mem_writereq#(`paddr, TMul#(`dblocks, TMul#(`dwords, 8))) mv_tree_write_mem_req_rd;
+      method Action ma_tree_write_mem_req_deq;
       interface Put#(Bool) put_tree_write_mem_resp;
   endinterface
 
@@ -169,7 +170,8 @@ package dmem;
     // Tree Memory Interface (physical memory side of TreeMemory adapter)
     interface get_tree_read_mem_req = tree_mem.get_mem_read_req;
     interface put_tree_read_mem_resp = tree_mem.put_mem_read_resp;
-    interface get_tree_write_mem_req = tree_mem.get_mem_write_req;
+    method mv_tree_write_mem_req_rd = tree_mem.mv_mem_write_req;
+    method ma_tree_write_mem_req_deq = tree_mem.ma_mem_write_req_deq;
     interface put_tree_write_mem_resp = tree_mem.put_mem_write_resp;
 
     method ma_cache_enable =  dcache.ma_cache_enable;

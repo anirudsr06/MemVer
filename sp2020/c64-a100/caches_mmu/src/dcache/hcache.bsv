@@ -76,6 +76,18 @@ module mkHCache(Ifc_HCache);
     // Storage: {valid, hash}
     RegFile#(Bit#(HAddrWidth), Bit#(TAdd#(HashWidth,1))) rf_nodes <- mkRegFileFull;
 
+    // Initialization: walk all entries and clear valid bits on reset
+    Reg#(Bool) rg_initialized <- mkReg(False);
+    Reg#(Bit#(HAddrWidth)) rg_init_idx <- mkReg(0);
+
+    rule rl_initialize(!rg_initialized);
+        rf_nodes.upd(rg_init_idx, 0); // valid=0, hash=0
+        if (rg_init_idx == maxBound)
+            rg_initialized <= True;
+        else
+            rg_init_idx <= rg_init_idx + 1;
+    endrule
+
     // Protected region configuration
     Bit#(`paddr) protected_base = 'h8500_0000;
     Bit#(`paddr) protected_limit = 'h8520_0000; // 2 MB
@@ -127,7 +139,7 @@ module mkHCache(Ifc_HCache);
         return (addr >= protected_base && addr < protected_limit);
     endfunction
 
-    method ActionValue#(Maybe#(Bit#(HashWidth))) get_hash(Level level, TreeIndex index);
+    method ActionValue#(Maybe#(Bit#(HashWidth))) get_hash(Level level, TreeIndex index) if (rg_initialized);
         if (!is_hw_level_func(level)) begin
             // Not in HW cache
             return tagged Invalid;
@@ -142,7 +154,7 @@ module mkHCache(Ifc_HCache);
         end
     endmethod
 
-    method Action set_hash(Level level, TreeIndex index, Bit#(HashWidth) hash);
+    method Action set_hash(Level level, TreeIndex index, Bit#(HashWidth) hash) if (rg_initialized);
         if (is_hw_level_func(level)) begin
             let addr = pack_addr(level, index);
             rf_nodes.upd(addr, {1'b1, hash});

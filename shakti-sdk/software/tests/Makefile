@@ -18,7 +18,7 @@ openocd ?= $(shell which openocd)
 
 GENLIB:=$(shell pwd)/
 
-all: check library do run_gdb finish
+all: check library do finish run_gdb 
 	@echo "All done"
 
 check:
@@ -85,10 +85,18 @@ else
 ifeq ($(PROGRAM),mkt)
 	@$(eval filepath := ./mkt)
 else
+ifeq ($(PROGRAM),custom_test)
+	@$(eval filepath := ./custom_test)
+else
+ifeq ($(PROGRAM),perf_test)
+	@$(eval filepath := ./perf_test)
+else
 ifeq ($(PROGRAM),paranoia)
 	@$(eval filepath := ./paranoia)
 else
 	@echo "Entry for $(PROGRAM) not present"
+endif
+endif
 endif
 endif
 endif
@@ -105,9 +113,7 @@ run_gdb: library do
 	@riscv-none-elf-gdb -ex "set remotetimeout unlimited" \
 	                              -ex "target remote localhost:3333" \
 	                              -ex "file $(GENLIB)$(PROGRAM)/output/$(PROGRAM).shakti" \
-	                              -ex "load" \
-	                              -ex "c"
-
+	                              -ex "load" 
 finish:
 	@if [ "$(PROGRAM)" = "all" ]; then \
 		echo "make all over"; \
