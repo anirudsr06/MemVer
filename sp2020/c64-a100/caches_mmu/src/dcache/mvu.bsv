@@ -402,11 +402,6 @@ endinterface
             
             let parent_hash = compute_hash(children);
             rg_computed_parent <= parent_hash;
-            // Save this node's own hash: this is what should be stored/checked
-            // at the CURRENT level. rg_my_node_hash was set by the previous
-            // level (or rl_compute_l0_parent), but now we update it to the
-            // current level's node value (= parent_hash of children).
-            rg_my_node_hash <= parent_hash;
             
             $display("[MVU] Computed parent = %h", parent_hash);
             if (rg_is_update)
@@ -516,12 +511,14 @@ endinterface
             Vector#(Arity, Bool) valid = replicate(False);
             Bit#(3) pos = child_position(rg_current_index);
             group[pos] = rg_computed_parent;
+
             valid[pos] = True;
             
             rg_current_level <= next_level;
             rg_current_index <= next_index;
             rg_node_group <= group;
             rg_node_valid <= valid;
+            rg_my_node_hash <= rg_computed_parent;
             
             $display("[MVU] Propagating to L%0d[%0d]", next_level, next_index);
             rg_state <= FETCH_SIBLINGS;

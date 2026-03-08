@@ -23,8 +23,8 @@
 #define UNPROT_BASE   0x84000000UL
 #define EVICT_STRIDE  0x1000UL  /* 4 KB */
 
-#define NUM_ITERS      100
-#define EVICT_ITERS     20   /* Fewer for eviction tests (MVU tree walk is slow) */
+#define NUM_ITERS      1000
+#define EVICT_ITERS     200   /* Fewer for eviction tests (MVU tree walk is slow) */
 #define NUM_ADDRS        8
 
 /* ---- Trap handler ---- */

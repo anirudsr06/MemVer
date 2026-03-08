@@ -150,8 +150,8 @@ module mkTreeMemory(Ifc_TreeMemory);
                 req.level, req.index, req.hash, addr);
 
         ff_mem_write_req.enq(DCache_mem_writereq {
-            address: {addr[`paddr-1:6], 6'b0}, // Align to 64-byte block
-            data: zeroExtend(req.hash) << ({addr[5:3], 6'b0}), // Shift hash to correct 8-byte lane in 64-byte block
+            address: addr, // Pass full unaligned address
+            data: zeroExtend(req.hash), // No need to shift; ccore takes truncate(data) directly
             burst_len: fromInteger(valueOf(`dblocks)-1), // 8 beats
             burst_size: fromInteger(valueOf(TLog#(`dwords))), // 8 bytes per beat
             io: False

@@ -66,7 +66,6 @@ int main(void) {
     } else {
         printf("FAIL: Tree memory did not change. MVU writes are dropping!\n");
         printf("========================================\n");
-        while(1) asm volatile("wfi");
     }
 
     printf("\n=== MVU MISVERIFICATION EXCEPTION TEST ===\n\n");

@@ -22,7 +22,7 @@ void main()
     	uint64_t end = *custom_mtime_ptr;
     	printf("Assignment Execution time: %lu ticks\n", end - start);
     	
-    	int* array2 = (int *)0x82004040;
+    	int* array2 = (int *)0x85004040;
 	uint64_t start1 = *custom_mtime_ptr;
 	for (int j = 0; j <= 10000; j++) 
 	{
