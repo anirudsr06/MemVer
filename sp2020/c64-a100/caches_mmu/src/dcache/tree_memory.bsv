@@ -53,6 +53,40 @@ module mkTreeMemory(Ifc_TreeMemory);
     Bit#(`paddr) level1_offset = 'h0000_0000;
     Bit#(`paddr) level2_offset = 'h0004_0000;
 
+    // ============ Boot-time memory initialization ============
+    // Zero protected data (0x85000000–0x851FFFFF) and tree nodes
+    // (0x85200000–0x85247FFF) before accepting any MVU requests.
+    // These regions are contiguous: 299,008 eight-byte words total.
+    // A 19-bit counter keeps area minimal on the Artix-7.
+    //
+    // Address = 0x85000000 + counter * 8
+    // Counter 0 .. 299007 (0x48FFF)
+    Reg#(Bool)     rg_mem_initialized <- mkReg(False);
+    Reg#(Bit#(19)) rg_init_count      <- mkReg(0);
+    Reg#(Bool)     rg_init_pending    <- mkReg(False);
+
+    rule rl_init_send(!rg_mem_initialized && !rg_init_pending);
+        Bit#(`paddr) addr = 'h8500_0000 + (zeroExtend(rg_init_count) << 3);
+        ff_mem_write_req.enq(DCache_mem_writereq {
+            address: addr,
+            data: 0,
+            burst_len: 7,   // 8-beat burst (ccore selects correct beat)
+            burst_size: 3,
+            io: False
+        });
+        rg_init_pending <= True;
+    endrule
+
+    rule rl_init_ack(!rg_mem_initialized && rg_init_pending);
+        ff_mem_write_resp.deq;
+        rg_init_pending <= False;
+        if (rg_init_count == 19'h48FFF) begin  // 299,007 = last word
+            rg_mem_initialized <= True;
+            $display("[TreeMem] Boot init complete: zeroed data + tree memory");
+        end else
+            rg_init_count <= rg_init_count + 1;
+    endrule
+
     // Internal state for read accumulation
     Reg#(UInt#(4)) rg_beat_count <- mkReg(0);
     Vector#(Arity, Reg#(Bit#(HashWidth))) rg_acc_hashes <- replicateM(mkReg(0));
@@ -72,7 +106,7 @@ module mkTreeMemory(Ifc_TreeMemory);
     //=====================================================
 
     // 1. Process new read request
-    rule rl_process_read_req(ff_tree_req.notEmpty && !rg_processing_read);
+    rule rl_process_read_req(rg_mem_initialized && ff_tree_req.notEmpty && !rg_processing_read);
         let req = ff_tree_req.first;
         ff_tree_req.deq;
 
@@ -100,7 +134,7 @@ module mkTreeMemory(Ifc_TreeMemory);
     endrule
 
     // 2. Process memory responses
-    rule rl_process_read_resp(rg_processing_read && ff_mem_read_resp.notEmpty);
+    rule rl_process_read_resp(rg_mem_initialized && rg_processing_read && ff_mem_read_resp.notEmpty);
         let resp = ff_mem_read_resp.first;
         ff_mem_read_resp.deq;
 
@@ -140,7 +174,7 @@ module mkTreeMemory(Ifc_TreeMemory);
     // Write Path
     //=====================================================
 
-    rule rl_process_write_req(ff_tree_write.notEmpty);
+    rule rl_process_write_req(rg_mem_initialized && ff_tree_write.notEmpty);
         let req = ff_tree_write.first;
         ff_tree_write.deq;
 
@@ -150,15 +184,15 @@ module mkTreeMemory(Ifc_TreeMemory);
                 req.level, req.index, req.hash, addr);
 
         ff_mem_write_req.enq(DCache_mem_writereq {
-            address: addr, // Pass full unaligned address
-            data: zeroExtend(req.hash), // No need to shift; ccore takes truncate(data) directly
-            burst_len: fromInteger(valueOf(`dblocks)-1), // 8 beats
-            burst_size: fromInteger(valueOf(TLog#(`dwords))), // 8 bytes per beat
+            address: addr,
+            data: zeroExtend(req.hash),
+            burst_len: 7,   // 8-beat burst (ccore selects correct beat)
+            burst_size: 3,
             io: False
         });
     endrule
 
-    rule rl_process_write_resp(ff_mem_write_resp.notEmpty);
+    rule rl_process_write_resp(rg_mem_initialized && ff_mem_write_resp.notEmpty);
         let resp = ff_mem_write_resp.first;
         ff_mem_write_resp.deq;
         ff_tree_write_resp.enq(resp);

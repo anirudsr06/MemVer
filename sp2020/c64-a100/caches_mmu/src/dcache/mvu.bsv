@@ -62,6 +62,7 @@ package mvu;
         CHECK_PARENT,      // Verify against stored or store new
         UPDATE_NODE,       // Write new hash to memory/storage
         WAIT_UPDATE_ACK,   // Wait for write completion
+        FETCH_HCACHE_SIBLINGS, //Hcache siblings were not even being fetched till now so the updated value was wrong from level 4
         PROPAGATE_UP,      // Move to next level
         VERIFY_ROOT,       // Final root check
         COMPLETE,
@@ -146,6 +147,7 @@ endinterface
         Vector#(Arity, Reg#(DCache_mem_readresp#(`dbuswidth))) rg_buffered_responses <- replicateM(mkReg(unpack(0)));
         Reg#(UInt#(4)) rg_beat_count <- mkReg(0);
         Reg#(UInt#(4)) rg_forward_beat <- mkReg(0);
+        Reg#(Bit#(3)) rg_sibling_ptr <- mkReg(0); // Tracks 0-7 For hcache siblings fetch
 
         Ifc_HCache hcache <- mkHCache;
 
@@ -323,13 +325,16 @@ endinterface
         // RULE: Request sibling nodes from memory
         //=====================================================
         rule rl_fetch_siblings(rg_state == FETCH_SIBLINGS);
-            if (hcache.is_hw_level(rg_current_level)) begin
-                // We're at HW level
-                $display("[MVU] Reached HW level %0d", rg_current_level);
-                if (rg_is_update)
+            if (rg_current_level >= hcache.get_tree_height()) begin
+                // We are at the Root. Do not fetch siblings; there are none.
+                // Go straight to checking the value we have in rg_my_node_hash.
+                if (rg_is_update) 
                     rg_state <= UPDATE_NODE;
-                else
+                else 
                     rg_state <= CHECK_PARENT;
+            end else if (hcache.is_hw_level(rg_current_level)) begin
+                rg_sibling_ptr <= 0;
+                rg_state <= FETCH_HCACHE_SIBLINGS;
             end else begin
                 // Need to fetch siblings from memory
                 TreeIndex base_idx = sibling_group_base(rg_current_index);
@@ -345,6 +350,32 @@ endinterface
                 });
                 
                 rg_state <= WAIT_SIBLINGS;
+            end
+        endrule
+
+        rule rl_collect_hcache_siblings(rg_state == FETCH_HCACHE_SIBLINGS);
+            Bit#(3) our_pos = child_position(rg_current_index);
+            TreeIndex base_idx = sibling_group_base(rg_current_index);
+
+            Vector#(Arity, Bit#(HashWidth)) group = rg_node_group;
+            Vector#(Arity, Bool) valid = rg_node_valid;
+            
+            if (rg_sibling_ptr != our_pos) begin
+                let h_maybe <- hcache.get_hash(rg_current_level, base_idx + extend(rg_sibling_ptr));
+                Bit#(HashWidth) h = fromMaybe(0, h_maybe);
+
+                group[rg_sibling_ptr] = h;
+                valid[rg_sibling_ptr] = True;
+                
+                rg_node_group <= group;
+                rg_node_valid <= valid;
+            end
+
+            if (rg_sibling_ptr == 7) begin
+                rg_state <= COMPUTE_PARENT;
+                rg_sibling_ptr <= 0;
+            end else begin
+                rg_sibling_ptr <= rg_sibling_ptr + 1;
             end
         endrule
 
@@ -421,13 +452,14 @@ endinterface
                 case (stored) matches
                     tagged Invalid: begin
                         // First time - store it
-                        hcache.set_hash(rg_current_level, rg_current_index, rg_computed_parent);
+                        hcache.set_hash(rg_current_level, rg_current_index, rg_my_node_hash);
                         $display("[MVU] Stored new hash at L%0d[%0d]", 
                                 rg_current_level, rg_current_index);
                     end
                     tagged Valid .h: begin
                         // Verify against stored hash
-                        if (h != rg_computed_parent) begin
+                        if (h != rg_my_node_hash) begin //Changed this to my node hash cause h is the hash at that level
+                        //The display codes are wrong below computed parent -> my node hash
                             // Signal hardware error -- will cause err=True on cache response
                             rg_mvu_error <= True;
                             $display("[MVU] HASH MISMATCH at L%0d[%0d]: stored=%h computed=%h",
@@ -455,9 +487,10 @@ endinterface
             if (hcache.is_hw_level(rg_current_level)) begin
                 // Update HW hash — at HW levels, rg_computed_parent holds the
                 // hash of all children at this level (= this node's value).
-                hcache.set_hash(rg_current_level, rg_current_index, rg_computed_parent);
+                //Updated with my node hash since that level's node is stored there only.
+                hcache.set_hash(rg_current_level, rg_current_index, rg_my_node_hash);
                 $display("[MVU] UPDATE: Updated HW Hash at L%0d[%0d] = %h", 
-                        rg_current_level, rg_current_index, rg_computed_parent);
+                        rg_current_level, rg_current_index, rg_my_node_hash);
                 
                 // Check root after HW update
                 if (rg_current_level >= hcache.get_tree_height()) begin
@@ -509,7 +542,7 @@ endinterface
             // Setup node group for next level
             Vector#(Arity, Bit#(HashWidth)) group = replicate(0);
             Vector#(Arity, Bool) valid = replicate(False);
-            Bit#(3) pos = child_position(rg_current_index);
+            Bit#(3) pos = child_position(next_index);
             group[pos] = rg_computed_parent;
 
             valid[pos] = True;
@@ -529,15 +562,15 @@ endinterface
         //=====================================================
         rule rl_verify_root(rg_state == VERIFY_ROOT);
             if (rg_trusted_root != 0) begin
-                if (rg_computed_parent != rg_trusted_root) begin
+                if (rg_my_node_hash != rg_trusted_root) begin
                     rg_mvu_error <= True;
                     $display("[MVU] ROOT MISMATCH: computed=%h trusted=%h",
-                            rg_computed_parent, rg_trusted_root);
+                            rg_my_node_hash, rg_trusted_root);
                 end else begin
-                    $display("[MVU] ROOT VERIFIED: %h", rg_computed_parent);
+                    $display("[MVU] ROOT VERIFIED: %h", rg_my_node_hash);
                 end
             end else begin
-                $display("[MVU] Root computed (no trusted root set): %h", rg_computed_parent);
+                $display("[MVU] Root computed (no trusted root set): %h", rg_my_node_hash);
             end
             
             rg_state <= COMPLETE;

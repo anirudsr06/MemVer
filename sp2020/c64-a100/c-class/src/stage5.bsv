@@ -436,12 +436,10 @@ package stage5;
         `logLevel( stage5, 0, $format("[%2d]STAGE5: Dropping instruction",hartid))
         Bool _fwd = True;
         if(commit matches tagged STORE .s) begin
-            `ifdef dcache
+      `ifdef dcache
           if(wr_cache_ready)
             wr_initiate_store<=tuple2(unpack(rg_epoch),True);
-
           else
-
               _fwd = False;
       `endif
         end
