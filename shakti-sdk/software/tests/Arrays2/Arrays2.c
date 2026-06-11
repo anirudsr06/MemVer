@@ -32,5 +32,7 @@ void main()
     		}
     	}
     	uint64_t end1 = *custom_mtime_ptr;
-    	printf("Array to Array transfer Execution time: %lu ticks\n", end1 - start1);
+    printf("Array to Array transfer Execution time: %lu ticks\n", end1 - start1);
+
+    while(1) asm volatile("wfi");
 }

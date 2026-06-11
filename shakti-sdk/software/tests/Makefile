@@ -94,7 +94,79 @@ else
 ifeq ($(PROGRAM),paranoia)
 	@$(eval filepath := ./paranoia)
 else
+ifeq ($(PROGRAM),mvu_test1_writeback)
+	@$(eval filepath := ./mvu_test1_writeback)
+else
+ifeq ($(PROGRAM),mvu_test2_tamper)
+	@$(eval filepath := ./mvu_test2_tamper)
+else
+ifeq ($(PROGRAM),mvu_test3_multilevel)
+	@$(eval filepath := ./mvu_test3_multilevel)
+else
+ifeq ($(PROGRAM),mvu_test4_crossgroup)
+	@$(eval filepath := ./mvu_test4_crossgroup)
+else
+ifeq ($(PROGRAM),mvu_test5_repeat)
+	@$(eval filepath := ./mvu_test5_repeat)
+else
+ifeq ($(PROGRAM),mvu_test6_boundary)
+	@$(eval filepath := ./mvu_test6_boundary)
+else
+ifeq ($(PROGRAM),mvu_test7_passthrough)
+	@$(eval filepath := ./mvu_test7_passthrough)
+else
+ifeq ($(PROGRAM),mvu_test8_stress)
+	@$(eval filepath := ./mvu_test8_stress)
+else
+ifeq ($(PROGRAM),mvu_test9_roundtrip)
+	@$(eval filepath := ./mvu_test9_roundtrip)
+else
+ifeq ($(PROGRAM),mvu_test10_treeprot)
+	@$(eval filepath := ./mvu_test10_treeprot)
+else
+ifeq ($(PROGRAM),mvu_perf1_rw)
+	@$(eval filepath := ./mvu_perf1_rw)
+else
+ifeq ($(PROGRAM),mvu_perf2_locality)
+	@$(eval filepath := ./mvu_perf2_locality)
+else
+ifeq ($(PROGRAM),mvu_perf3_scaling)
+	@$(eval filepath := ./mvu_perf3_scaling)
+else
+ifeq ($(PROGRAM),mvu_perf4_mixed)
+	@$(eval filepath := ./mvu_perf4_mixed)
+else
+ifeq ($(PROGRAM),bench_sequential)
+	@$(eval filepath := ./bench_sequential)
+else
+ifeq ($(PROGRAM),bench_miss_latency)
+	@$(eval filepath := ./bench_miss_latency)
+else
+ifeq ($(PROGRAM),bench_sparse_dense)
+	@$(eval filepath := ./bench_sparse_dense)
+else
+ifeq ($(PROGRAM),bench_workingset)
+	@$(eval filepath := ./bench_workingset)
+else
 	@echo "Entry for $(PROGRAM) not present"
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
 endif
 endif
 endif

@@ -1,9 +1,3 @@
-/*
-Tree Memory Adapter
-Translates abstract tree node requests (level, index) into physical memory requests.
-Integrates with the main memory system via DCache_mem_* interfaces.
-*/
-
 package tree_memory;
 
 import FIFOF::*;
@@ -49,22 +43,16 @@ module mkTreeMemory(Ifc_TreeMemory);
     FIFOF#(Bool) ff_mem_write_resp <- mkFIFOF;
 
     // Address constants (Must match hcache.bsv)
-    Bit#(`paddr) tree_base = 'h8520_0000;
+    Bit#(`paddr) tree_base = 'h8540_0000;
     Bit#(`paddr) level1_offset = 'h0000_0000;
-    Bit#(`paddr) level2_offset = 'h0004_0000;
+    Bit#(`paddr) level2_offset = 'h0008_0000;
+    Bit#(`paddr) level3_offset = 'h0009_0000;
 
-    // ============ Boot-time memory initialization ============
-    // Zero protected data (0x85000000–0x851FFFFF) and tree nodes
-    // (0x85200000–0x85247FFF) before accepting any MVU requests.
-    // These regions are contiguous: 299,008 eight-byte words total.
-    // A 19-bit counter keeps area minimal on the Artix-7.
-    //
-    // Address = 0x85000000 + counter * 8
-    // Counter 0 .. 299007 (0x48FFF)
     Reg#(Bool)     rg_mem_initialized <- mkReg(False);
-    Reg#(Bit#(19)) rg_init_count      <- mkReg(0);
+    Reg#(Bit#(21)) rg_init_count      <- mkReg(0);
     Reg#(Bool)     rg_init_pending    <- mkReg(False);
 
+    // Rule to initialize protected memory region with zeroes
     rule rl_init_send(!rg_mem_initialized && !rg_init_pending);
         Bit#(`paddr) addr = 'h8500_0000 + (zeroExtend(rg_init_count) << 3);
         ff_mem_write_req.enq(DCache_mem_writereq {
@@ -80,9 +68,9 @@ module mkTreeMemory(Ifc_TreeMemory);
     rule rl_init_ack(!rg_mem_initialized && rg_init_pending);
         ff_mem_write_resp.deq;
         rg_init_pending <= False;
-        if (rg_init_count == 19'h48FFF) begin  // 299,007 = last word
+        if (rg_init_count == 21'h0923FF) begin
             rg_mem_initialized <= True;
-            $display("[TreeMem] Boot init complete: zeroed data + tree memory");
+            $display("[TreeMem] Boot init complete: zeroed data + tree memory (4MB)");
         end else
             rg_init_count <= rg_init_count + 1;
     endrule
@@ -94,18 +82,16 @@ module mkTreeMemory(Ifc_TreeMemory);
     Reg#(TreeNodeReq) rg_current_req <- mkReg(?);
     Reg#(Bool) rg_processing_read <- mkReg(False);
 
-    // Address calculation helper
+    // Calculate node address
     function Bit#(`paddr) get_node_addr(Level level, TreeIndex index);
-        Bit#(`paddr) level_offset = (level == 1) ? level1_offset : level2_offset;
+        Bit#(`paddr) level_offset = (level == 1) ? level1_offset :
+                                    (level == 2) ? level2_offset :
+                                                   level3_offset;
         Bit#(`paddr) node_offset = zeroExtend(index) << 3; // 8 bytes per node
         return tree_base + level_offset + node_offset;
     endfunction
 
-    //=====================================================
-    // Read Path
-    //=====================================================
-
-    // 1. Process new read request
+    // Rule to process new read request
     rule rl_process_read_req(rg_mem_initialized && ff_tree_req.notEmpty && !rg_processing_read);
         let req = ff_tree_req.first;
         ff_tree_req.deq;
@@ -116,11 +102,10 @@ module mkTreeMemory(Ifc_TreeMemory);
         $display("[TreeMem] Read Req: L%0d[%0d] -> PhysAddr %h", req.level, req.base_index, addr);
 
         // Issue burst read check for 8 siblings (64 bytes)
-        // burst_len = 7 means 8 beats
         ff_mem_read_req.enq(DCache_mem_readreq {
             address: addr,
             burst_len: 7,
-            burst_size: 3, // 8 bytes (64-bit)
+            burst_size: 3,
             io: False
         });
 
@@ -133,7 +118,7 @@ module mkTreeMemory(Ifc_TreeMemory);
         end
     endrule
 
-    // 2. Process memory responses
+    // Rule to process memory responses
     rule rl_process_read_resp(rg_mem_initialized && rg_processing_read && ff_mem_read_resp.notEmpty);
         let resp = ff_mem_read_resp.first;
         ff_mem_read_resp.deq;
@@ -170,10 +155,8 @@ module mkTreeMemory(Ifc_TreeMemory);
         end
     endrule
 
-    //=====================================================
-    // Write Path
-    //=====================================================
 
+    // Rule to process write request
     rule rl_process_write_req(rg_mem_initialized && ff_tree_write.notEmpty);
         let req = ff_tree_write.first;
         ff_tree_write.deq;
@@ -198,10 +181,6 @@ module mkTreeMemory(Ifc_TreeMemory);
         ff_tree_write_resp.enq(resp);
         $display("[TreeMem] Write Complete");
     endrule
-
-    //=====================================================
-    // Interfaces
-    //=====================================================
 
     interface put_req = toPut(ff_tree_req);
     interface get_resp = toGet(ff_tree_resp);

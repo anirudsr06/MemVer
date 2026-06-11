@@ -1,21 +1,3 @@
-/*
-Implements recursive verification from leaves to root with on-demand sibling fetching.
-
-Architecture:
-1. On cache miss: Fetch 64-byte cache line (8 leaves)
-2. Compute hashes for these 8 leaves
-3. Compute parent hash from these 8 children
-4. Fetch 7 sibling nodes from memory (the other children at this level)
-5. Compute next level parent
-6. Repeat until reaching HCache levels
-7. Verify against stored hash or store if first time
-8. Continue to root
-
-Memory Interface:
-- Data fetches: Standard cache line requests
-- Tree node fetches: Special requests for sibling nodes
-*/
-
 package mvu;
     import FIFOF::*;
     import FIFO::*;
@@ -26,10 +8,10 @@ package mvu;
     import hcache::*;
     `include "dcache.defines"
 
-    typedef 8 Arity;        // 8 children per parent
+    typedef 8 Arity;
     typedef 64 HashWidth;
     typedef Bit#(4) Level;
-    typedef Bit#(18) TreeIndex;
+    typedef Bit#(19) TreeIndex;
 
     // Request for tree nodes from memory
     typedef struct {
@@ -54,19 +36,19 @@ package mvu;
     // Verification state
     typedef enum {
         IDLE,
-        ACCUMULATING,      // Collecting 8 beats to form leaves
-        COMPUTE_L0_PARENT, // Hash the 8 leaves together
-        FETCH_SIBLINGS,    // Request siblings from memory
-        WAIT_SIBLINGS,     // Wait for sibling response
-        COMPUTE_PARENT,    // Hash current level's 8 nodes
-        CHECK_PARENT,      // Verify against stored or store new
-        UPDATE_NODE,       // Write new hash to memory/storage
-        WAIT_UPDATE_ACK,   // Wait for write completion
-        FETCH_HCACHE_SIBLINGS, //Hcache siblings were not even being fetched till now so the updated value was wrong from level 4
-        PROPAGATE_UP,      // Move to next level
-        VERIFY_ROOT,       // Final root check
+        ACCUMULATING,
+        COMPUTE_L0_PARENT,
+        FETCH_SIBLINGS,
+        WAIT_SIBLINGS,
+        COMPUTE_PARENT,
+        CHECK_PARENT,
+        UPDATE_NODE,
+        WAIT_UPDATE_ACK,
+        FETCH_HCACHE_SIBLINGS,
+        PROPAGATE_UP,
+        VERIFY_ROOT,
         COMPLETE,
-        FORWARD_TO_CACHE   // Done
+        FORWARD_TO_CACHE
     } VerifyState deriving(Bits, Eq, FShow);
 
 interface Ifc_mvu;
@@ -123,8 +105,6 @@ endinterface
         // State machine
         Reg#(VerifyState) rg_state <- mkReg(IDLE);
 
-
-
         // Current verification path
         Reg#(Level) rg_current_level <- mkReg(0);
         Reg#(TreeIndex) rg_current_index <- mkReg(0);
@@ -147,11 +127,10 @@ endinterface
         Vector#(Arity, Reg#(DCache_mem_readresp#(`dbuswidth))) rg_buffered_responses <- replicateM(mkReg(unpack(0)));
         Reg#(UInt#(4)) rg_beat_count <- mkReg(0);
         Reg#(UInt#(4)) rg_forward_beat <- mkReg(0);
-        Reg#(Bit#(3)) rg_sibling_ptr <- mkReg(0); // Tracks 0-7 For hcache siblings fetch
+        Reg#(Bit#(3)) rg_sibling_ptr <- mkReg(0); 
 
         Ifc_HCache hcache <- mkHCache;
 
-        // Hash function: Add all 8 children (better placeholder than XOR for bursts)
         function Bit#(HashWidth) compute_hash(Vector#(Arity, Bit#(HashWidth)) children);
             Bit#(HashWidth) result = 0;
             for (Integer i = 0; i < valueOf(Arity); i = i + 1)
@@ -169,9 +148,7 @@ endinterface
             return (index >> 3) << 3; // Clear lower 3 bits
         endfunction
 
-        //=====================================================
-        // RULE: Handle Eviction Request (Start Update)
-        //=====================================================
+        // Rule to handle eviction request after checking whether in protected region or not
         rule rl_start_update(
             ff_evict_req.notEmpty && 
             rg_state == IDLE
@@ -203,9 +180,7 @@ endinterface
             end
         endrule
 
-        //=====================================================
-        // RULE: Forward request to memory
-        //=====================================================
+        // Rule to forward request to fetch from memory
         rule rl_forward_request(
             ff_req_from_cache.notEmpty && 
             !isValid(rg_pending_req) &&
@@ -240,9 +215,7 @@ endinterface
             ff_req_to_mem.enq(req);
         endrule
 
-        //=====================================================
-        // RULE: Accumulate leaves from memory responses
-        //=====================================================
+        // Rule to accumulate (send memory request to) required nodes from memory to begin verification
         rule rl_accumulate(
             ff_resp_from_mem.notEmpty &&& 
             rg_pending_req matches tagged Valid .req &&&
@@ -281,9 +254,7 @@ endinterface
             end
         endrule
 
-        //=====================================================
-        // RULE: Compute Level 0 parent from 8 leaves
-        //=====================================================
+        // Rule to compute zeroth level from accumulated nodes 
         rule rl_compute_l0_parent(rg_state == COMPUTE_L0_PARENT);
             Vector#(Arity, Bit#(HashWidth)) leaves = replicate(0);
             for (Integer i = 0; i < valueOf(Arity); i = i + 1)
@@ -321,9 +292,7 @@ endinterface
 
         endrule
 
-        //=====================================================
-        // RULE: Request sibling nodes from memory
-        //=====================================================
+        // Rule to fetch siblings (send memory request) from next level stored in memory
         rule rl_fetch_siblings(rg_state == FETCH_SIBLINGS);
             if (rg_current_level >= hcache.get_tree_height()) begin
                 // We are at the Root. Do not fetch siblings; there are none.
@@ -353,6 +322,7 @@ endinterface
             end
         endrule
 
+        // Rule to accumulate sibling nodes from hcache
         rule rl_collect_hcache_siblings(rg_state == FETCH_HCACHE_SIBLINGS);
             Bit#(3) our_pos = child_position(rg_current_index);
             TreeIndex base_idx = sibling_group_base(rg_current_index);
@@ -379,9 +349,7 @@ endinterface
             end
         endrule
 
-        //=====================================================
-        // RULE: Receive sibling nodes from memory
-        //=====================================================
+        // Rule to receive memory response for sibling nodes
         rule rl_wait_siblings(rg_state == WAIT_SIBLINGS);
             let resp = ff_tree_resp.first;
             ff_tree_resp.deq;
@@ -392,21 +360,7 @@ endinterface
             
             for (Integer i = 0; i < valueOf(Arity); i = i + 1) begin
                 if (resp.valid[i]) begin
-                    // If update mode, we overwrite OLD hash at our pos with NEW hash
-                    // But in UPDATE mode, rg_node_group ALREADY has correct new hash at our_pos
-                    // Siblings are neighbors. Masks ensure we don't overwrite neighbors?
-                    // But we requested all siblings EXCEPT our position usually?
-                    // Actually mask usage is optional in current tree_memory.
-                    // But group[i] overwrites.
-                    // Important: Don't overwrite our computed hash with old hash from memory!
-                    // In Verification, it doesn't matter (should match).
-                    // In Update, it DOES matter.
-                    // Currently `child_position` logic ensures `valid[pos]` is True.
-                    // If memory returns data for our pos, we should IGNORE it?
-                    // `tree_memory` fetches 8 nodes.
-                    // `resp` has all 8.
-                    // Our `rg_node_group` has our calculated node at `pos`.
-                    
+
                     Bit#(3) our_pos = child_position(rg_current_index);
                     if (fromInteger(i) != our_pos) begin
                         group[i] = resp.hashes[i];
@@ -420,9 +374,7 @@ endinterface
             rg_state <= COMPUTE_PARENT;
         endrule
 
-        //=====================================================
-        // RULE: Compute parent hash from 8 siblings
-        //=====================================================
+        // Rule to compute hash for next level from stored hashes
         rule rl_compute_parent(rg_state == COMPUTE_PARENT);
             // Use 0 for missing siblings (sparse tree)
             Vector#(Arity, Bit#(HashWidth)) children = rg_node_group;
@@ -441,9 +393,7 @@ endinterface
                 rg_state <= CHECK_PARENT;
         endrule
 
-        //=====================================================
-        // RULE: Check/store parent hash
-        //=====================================================
+        // Rule to verify parent hash with stored value
         rule rl_check_parent(rg_state == CHECK_PARENT);
             if (hcache.is_hw_level(rg_current_level)) begin
                 // Check against stored hash
@@ -480,9 +430,7 @@ endinterface
             end
         endrule
 
-        //=====================================================
-        // RULE: Update Node (Write Back)
-        //=====================================================
+        // Rule to write back to stored nodes in memory
         rule rl_update_node(rg_state == UPDATE_NODE);
             if (hcache.is_hw_level(rg_current_level)) begin
                 // Update HW hash — at HW levels, rg_computed_parent holds the
@@ -514,9 +462,7 @@ endinterface
             end
         endrule
 
-        //=====================================================
-        // RULE: Wait for Write Acknowledgment
-        //=====================================================
+        // Rule to receive write response
         rule rl_wait_update_ack(rg_state == WAIT_UPDATE_ACK);
             // Consume response
             let ack = ff_tree_write_resp.first;
@@ -532,9 +478,7 @@ endinterface
             end
         endrule
 
-        //=====================================================
-        // RULE: Propagate to next level
-        //=====================================================
+        // Rule to move to next level
         rule rl_propagate_up(rg_state == PROPAGATE_UP);
             TreeIndex next_index = rg_current_index >> 3; // Parent index
             Level next_level = rg_current_level + 1;
@@ -557,9 +501,7 @@ endinterface
             rg_state <= FETCH_SIBLINGS;
         endrule
 
-        //=====================================================
-        // RULE: Verify root
-        //=====================================================
+        // Final level verification
         rule rl_verify_root(rg_state == VERIFY_ROOT);
             if (rg_trusted_root != 0) begin
                 if (rg_my_node_hash != rg_trusted_root) begin
@@ -576,9 +518,7 @@ endinterface
             rg_state <= COMPLETE;
         endrule
 
-        //=====================================================
-        // RULE: Complete verification
-        //=====================================================
+        // Complete
         rule rl_complete(rg_state == COMPLETE);
             $display("[MVU] Operation complete (error=%b)\n", rg_mvu_error);
             
@@ -594,9 +534,7 @@ endinterface
             rg_from_protected <= False;
         endrule
 
-        //=====================================================
-        // RULE: Forward unprotected responses
-        //=====================================================
+        // Rule to pass through unprotected data
         rule rl_forward_unprotected(
             ff_resp_from_mem.notEmpty &&& 
             rg_pending_req matches tagged Valid .req &&&
@@ -612,9 +550,7 @@ endinterface
             end
         endrule
 
-        //=====================================================
-        // RULE: Forward buffered responses to cache after verification
-        //=====================================================
+        // Rule to forward verified data to cache
         rule rl_forward_verified(rg_state == FORWARD_TO_CACHE);
             let resp = rg_buffered_responses[rg_forward_beat];
             // If a hash mismatch was detected, poison all beats with err=True
@@ -637,9 +573,6 @@ endinterface
             end
         endrule
         
-        //=====================================================
-        // Interface
-        //=====================================================
         interface put_cache_read_req = toPut(ff_req_from_cache);
         interface get_cache_read_resp = toGet(ff_resp_to_cache);
         interface put_evict_req = toPut(ff_evict_req);

@@ -2,7 +2,7 @@
 #include <stdio.h>
 
 #define PROTECTED_ADDR    ((volatile uint64_t *)0x85000040UL)
-#define L1_SIBLING_ADDR   ((volatile uint64_t *)0x85200000UL)
+#define L1_SIBLING_ADDR   ((volatile uint64_t *)0x85200008UL)
 #define CONFLICT_ADDR_A   ((volatile uint64_t *)0x84000040UL)
 #define TREE_CONFLICT_A   ((volatile uint64_t *)0x85201000UL)
 

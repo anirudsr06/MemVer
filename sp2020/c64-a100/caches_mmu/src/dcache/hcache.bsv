@@ -1,25 +1,3 @@
-/*
-HCache.bsv - Refactored for Sparse Merkle Tree
-Stores only the TOP levels of the tree (near root) in hardware.
-Lower levels are computed on-demand and verified against stored upper levels.
-
-Tree Structure (Arity 8):
-- Each leaf = 8 bytes (one beat)
-- Each parent = hash of 8 children
-- Cache line = 64 bytes = 8 consecutive leaves
-
-Example for 2MB protected region:
-  Level 0: 2MB / 8B = 262,144 leaves
-  Level 1: 262,144 / 8 = 32,768 nodes
-  Level 2: 32,768 / 8 = 4,096 nodes
-  Level 3: 4,096 / 8 = 512 nodes
-  Level 4: 512 / 8 = 64 nodes
-  Level 5: 64 / 8 = 8 nodes
-  Level 6: 8 / 8 = 1 node (root)
-
-We store levels 3-6 in HCache (4 levels, ~4.5KB)
-*/
-
 package hcache;
 
 import RegFile :: *;
@@ -29,13 +7,13 @@ import Vector :: *;
 
 // Configuration constants
 typedef 64 HashWidth;          // Hash size in bits
-typedef 18 MaxLeafIndexWidth;  // 2MB / 8B = 256K leaves = 18 bits
-typedef 6  TreeHeight;         // Height of tree (0-6 for 2MB)
-typedef 4  TopLevelsStored;    // Store top 4 levels in HW (levels 3-6)
+typedef 19 MaxLeafIndexWidth;  // 4MB / 8B = 512K leaves = 19 bits
+typedef 7  TreeHeight;         // Height of tree (0-7 for 4MB)
+typedef 4  TopLevelsStored;    // Store top 4 levels in HW (levels 4-7)
 
 // Compute max nodes at highest stored level
-// Level 3 has 512 nodes, so we need 9 bits for index
-typedef 9 MaxStoredIndexWidth;
+// Level 4 has 128 nodes, so we need 7 bits for index
+typedef 7 MaxStoredIndexWidth;
 
 // Address width for HCache: level_offset (2 bits for 4 levels) + index
 typedef TAdd#(2, MaxStoredIndexWidth) HAddrWidth;
@@ -90,14 +68,16 @@ module mkHCache(Ifc_HCache);
 
     // Protected region configuration
     Bit#(`paddr) protected_base = 'h8500_0000;
-    Bit#(`paddr) protected_limit = 'h8520_0000; // 2 MB
+    Bit#(`paddr) protected_limit = 'h8540_0000; // 4 MB
 
     // Tree memory region (after data region)
-    // Level 1: 32,768 nodes * 8 bytes = 256 KB at 0x200000
-    // Level 2: 4,096 nodes * 8 bytes = 32 KB at 0x240000
-    Bit#(`paddr) tree_base = 'h8520_0000;
-    Bit#(`paddr) level1_offset = 'h0000_0000;  // 0x200000
-    Bit#(`paddr) level2_offset = 'h0004_0000;  // 0x240000
+    // Level 1: 65,536 nodes * 8 bytes = 512 KB
+    // Level 2: 8,192 nodes * 8 bytes = 64 KB
+    // Level 3: 1,024 nodes * 8 bytes = 8 KB
+    Bit#(`paddr) tree_base = 'h8540_0000;
+    Bit#(`paddr) level1_offset = 'h0000_0000;
+    Bit#(`paddr) level2_offset = 'h0008_0000;
+    Bit#(`paddr) level3_offset = 'h0009_0000;
 
     // Tree configuration
     Integer tree_height = valueOf(TreeHeight);
@@ -188,7 +168,9 @@ module mkHCache(Ifc_HCache);
     // Level 1: base + 0x00000 + index * 8
     // Level 2: base + 0x40000 + index * 8
     method Bit#(`paddr) get_tree_node_addr(Level level, TreeIndex index);
-        Bit#(`paddr) level_offset = (level == 1) ? level1_offset : level2_offset;
+        Bit#(`paddr) level_offset = (level == 1) ? level1_offset :
+                                    (level == 2) ? level2_offset :
+                                                   level3_offset;
         Bit#(`paddr) node_offset = zeroExtend(index) << 3;  // index * 8 bytes
         return tree_base + level_offset + node_offset;
     endmethod
